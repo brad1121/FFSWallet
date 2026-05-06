@@ -16,20 +16,24 @@ html_escape() {
 
 rm -rf "$out_dir"
 mkdir -p "$out_dir/downloads"
+cp "assets/home-screen.png" "$out_dir/home-screen.png"
 
 gh api "repos/$repo/releases?per_page=20" > "$releases_json"
 
 cat > "$out_dir/styles.css" <<'EOF'
 :root {
   color-scheme: dark;
-  --bg: #0b1020;
-  --panel: #11182d;
-  --panel-2: #18223f;
-  --text: #edf2ff;
-  --muted: #99a6cc;
-  --accent: #79b8ff;
+  --bg: #0d1117;
+  --bg-2: #121923;
+  --panel: #171f2b;
+  --panel-2: #1f2a38;
+  --panel-3: #0f1620;
+  --text: #f5f7fb;
+  --muted: #a9b4c8;
+  --accent: #7eb6ff;
   --accent-2: #f7931a;
-  --border: #27345e;
+  --border: #2b3648;
+  --shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
 }
 
 * {
@@ -39,7 +43,10 @@ cat > "$out_dir/styles.css" <<'EOF'
 body {
   margin: 0;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: linear-gradient(180deg, #0b1020 0%, #121b33 100%);
+  background:
+    radial-gradient(circle at top left, rgba(247, 147, 26, 0.14), transparent 28%),
+    radial-gradient(circle at top right, rgba(126, 182, 255, 0.16), transparent 26%),
+    linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
   color: var(--text);
 }
 
@@ -53,41 +60,213 @@ a:hover {
 }
 
 .shell {
-  max-width: 1040px;
+  max-width: 1180px;
   margin: 0 auto;
-  padding: 32px 20px 64px;
+  padding: 28px 20px 72px;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: rgba(15, 22, 32, 0.82);
+  box-shadow: var(--shadow);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #ffb34d, var(--accent-2));
+  color: #111;
+  font-weight: 800;
+  box-shadow: 0 10px 30px rgba(247, 147, 26, 0.35);
+}
+
+.brand-copy h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.brand-copy p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.toplinks {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.toplinks a {
+  color: var(--muted);
+  font-size: 14px;
 }
 
 .hero {
-  padding: 28px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr);
+  gap: 20px;
+  margin-bottom: 22px;
+}
+
+.hero-main,
+.hero-side,
+.section-card,
+.release-card {
   border: 1px solid var(--border);
-  border-radius: 20px;
-  background: rgba(17, 24, 45, 0.92);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+  border-radius: 22px;
+  background: rgba(23, 31, 43, 0.86);
+  box-shadow: var(--shadow);
 }
 
-.hero h1 {
+.hero-main {
+  overflow: hidden;
+}
+
+.hero-copy {
+  padding: 30px 30px 20px;
+}
+
+.hero-copy h2 {
   margin: 0 0 12px;
-  font-size: 40px;
+  font-size: 48px;
+  line-height: 1.05;
 }
 
-.hero p {
+.hero-copy p {
   margin: 8px 0;
   color: var(--muted);
-  line-height: 1.6;
+  line-height: 1.7;
+  max-width: 60ch;
+}
+
+.cta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-weight: 700;
+}
+
+.button.primary {
+  background: linear-gradient(135deg, #ffb34d, var(--accent-2));
+  color: #111;
+}
+
+.button.secondary {
+  border-color: var(--border);
+  background: rgba(15, 22, 32, 0.78);
+  color: var(--text);
+}
+
+.hero-shot {
+  padding: 0 18px 18px;
+}
+
+.hero-shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--panel-3);
+}
+
+.hero-side {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  align-content: start;
 }
 
 .grid {
   display: grid;
-  gap: 18px;
-  margin-top: 24px;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 20px;
 }
 
-.card {
+.section-card {
+  padding: 24px;
+}
+
+.section-card + .section-card {
+  margin-top: 18px;
+}
+
+.release-card {
+  padding: 18px;
+}
+
+.release-title {
+  margin: 0;
+  font-size: 24px;
+}
+
+.section-title {
+  margin: 0 0 12px;
+  font-size: 28px;
+}
+
+.section-copy {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.feature-list {
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 12px;
+}
+
+.feature-list li {
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  gap: 14px;
   padding: 22px;
   border: 1px solid var(--border);
   border-radius: 18px;
-  background: rgba(24, 34, 63, 0.84);
+  background: rgba(15, 22, 32, 0.68);
+}
+
+.feature-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+  background: rgba(126, 182, 255, 0.12);
+  color: var(--accent);
+  font-size: 20px;
 }
 
 .kicker {
@@ -99,15 +278,11 @@ a:hover {
   text-transform: uppercase;
 }
 
-.release-title {
-  margin: 0;
-  font-size: 24px;
-}
-
 .meta {
   margin: 8px 0 0;
   color: var(--muted);
   font-size: 14px;
+  line-height: 1.6;
 }
 
 .assets {
@@ -115,14 +290,14 @@ a:hover {
   padding: 0;
   list-style: none;
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .assets li {
   padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: rgba(11, 16, 32, 0.7);
+  background: rgba(15, 22, 32, 0.76);
   display: flex;
   justify-content: space-between;
   gap: 16px;
@@ -137,6 +312,7 @@ a:hover {
   margin-top: 28px;
   color: var(--muted);
   font-size: 14px;
+  text-align: center;
 }
 
 code {
@@ -146,8 +322,27 @@ code {
 }
 
 @media (max-width: 720px) {
-  .hero h1 {
-    font-size: 30px;
+  .shell {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .topbar,
+  .hero,
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    padding: 16px;
+  }
+
+  .hero-copy {
+    padding: 22px 18px 16px;
+  }
+
+  .hero-copy h2 {
+    font-size: 34px;
   }
 
   .assets li {
@@ -157,7 +352,36 @@ code {
 }
 EOF
 
-cat > "$out_dir/index.html" <<'EOF'
+release_count="$(jq 'length' "$releases_json")"
+latest_tag=""
+latest_name="No release yet"
+latest_published=""
+latest_body=""
+
+if [ "$release_count" -gt 0 ]; then
+  latest_tag="$(jq -r '.[0].tag_name' "$releases_json")"
+  latest_name="$(jq -r '.[0].name // .[0].tag_name' "$releases_json")"
+  latest_published="$(jq -r '.[0].published_at // .[0].created_at // ""' "$releases_json")"
+  latest_body="$(jq -r '.[0].body // ""' "$releases_json")"
+  latest_body="${latest_body//$'\n'/ }"
+fi
+
+latest_tag_html="No tag published yet"
+if [ -n "$latest_tag" ]; then
+  latest_tag_html="Tag <code>$latest_tag</code>"
+fi
+
+latest_published_html=""
+if [ -n "$latest_published" ]; then
+  latest_published_html="<p class=\"meta\">Published $latest_published</p>"
+fi
+
+latest_body_html=""
+if [ -n "$latest_body" ]; then
+  latest_body_html="<p class=\"meta\">$(html_escape "$latest_body")</p>"
+fi
+
+cat > "$out_dir/index.html" <<EOF
 <!doctype html>
 <html lang="en">
 <head>
@@ -168,27 +392,80 @@ cat > "$out_dir/index.html" <<'EOF'
 </head>
 <body>
   <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">F</div>
+        <div class="brand-copy">
+          <h1>FFSWallet</h1>
+          <p>Private desktop wallet. Public binary downloads.</p>
+        </div>
+      </div>
+      <nav class="toplinks">
+        <a href="#latest">Latest Release</a>
+        <a href="#features">Features</a>
+        <a href="#downloads">Downloads</a>
+      </nav>
+    </header>
+
     <section class="hero">
-      <p class="kicker">Public Downloads</p>
-      <h1>FFSWallet Releases</h1>
-      <p>Wallet source can stay private. This site publishes built release binaries and signatures only.</p>
-      <p>Linux downloads include <code>SHA256SUMS</code> plus Sigstore keyless signatures.</p>
+      <article class="hero-main">
+        <div class="hero-copy">
+          <p class="kicker">Take Control</p>
+          <h2>Bitcoin SV wallet with local control, seed recovery, and downloadable desktop builds.</h2>
+          <p>FFSWallet keeps source private while publishing signed binaries for Linux, macOS, and Windows. Import an existing seed, optionally rescan from a chosen block hash, and manage funds from a native desktop UI.</p>
+          <div class="cta-row">
+            <a class="button primary" href="#downloads">Download Latest Release</a>
+            <a class="button secondary" href="#features">See Features</a>
+          </div>
+        </div>
+        <div class="hero-shot">
+          <img src="home-screen.png" alt="FFSWallet home screen">
+        </div>
+      </article>
+      <aside class="hero-side" id="latest">
+        <article class="release-card">
+          <p class="kicker">Latest Release</p>
+          <h3 class="release-title">$(html_escape "$latest_name")</h3>
+          <p class="meta">$latest_tag_html</p>
+          $latest_published_html
+          $latest_body_html
+        </article>
+        <article class="release-card">
+          <p class="kicker">Why This Site</p>
+          <p class="meta">Release binaries and signatures are public here. Source code stays out of the download site.</p>
+          <p class="meta">Linux builds include <code>SHA256SUMS</code> and Sigstore keyless signatures.</p>
+        </article>
+      </aside>
     </section>
+
+    <section class="grid">
+      <div>
+        <article class="section-card" id="features">
+          <p class="kicker">Features</p>
+          <h3 class="section-title">Built for straightforward self-custody</h3>
+          <p class="section-copy">Desktop-first wallet flow with encrypted local storage, controlled seed import, and release artifacts published for direct download.</p>
+          <ul class="feature-list">
+            <li><div class="feature-icon">🔐</div><div><strong>Encrypted local wallet file</strong><br><span class="meta">Wallet secrets stored locally with Argon2id and AES-GCM.</span></div></li>
+            <li><div class="feature-icon">🌱</div><div><strong>Seed word recovery</strong><br><span class="meta">Restore from existing seed words and choose whether to run a long rescan.</span></div></li>
+            <li><div class="feature-icon">⬇</div><div><strong>Direct desktop downloads</strong><br><span class="meta">Linux AppImage, macOS app bundle archive, and raw Windows executable.</span></div></li>
+          </ul>
+        </article>
+
+        <article class="section-card" id="downloads">
+          <p class="kicker">Release Archive</p>
+          <h3 class="section-title">Public downloads</h3>
+          <p class="section-copy">Choose a release below. Latest release appears first.</p>
 EOF
 
-release_count="$(jq 'length' "$releases_json")"
 if [ "$release_count" -eq 0 ]; then
   cat >> "$out_dir/index.html" <<'EOF'
-    <section class="grid">
-      <article class="card">
-        <p class="kicker">No Releases</p>
-        <h2 class="release-title">Nothing published yet</h2>
-        <p class="meta">Run release workflow with a tag like <code>v0.1.0</code>.</p>
-      </article>
-    </section>
+          <article class="release-card" style="margin-top:18px;">
+            <p class="kicker">No Releases</p>
+            <h2 class="release-title">Nothing published yet</h2>
+            <p class="meta">Run release workflow with a tag like <code>v0.0.1</code>.</p>
+          </article>
 EOF
 else
-  printf '%s\n' '    <section class="grid">' >> "$out_dir/index.html"
   for i in $(seq 0 $((release_count - 1))); do
     tag="$(jq -r ".[$i].tag_name" "$releases_json")"
     name="$(jq -r ".[$i].name // .[$i].tag_name" "$releases_json")"
@@ -205,36 +482,51 @@ else
       kicker="Release"
     fi
 
-    printf '%s\n' '      <article class="card">' >> "$out_dir/index.html"
-    printf '        <p class="kicker">%s</p>\n' "$kicker" >> "$out_dir/index.html"
-    printf '        <h2 class="release-title">%s</h2>\n' "$(html_escape "$name")" >> "$out_dir/index.html"
-    printf '        <p class="meta">Tag <code>%s</code>%s</p>\n' "$tag" "$( [ -n "$published" ] && printf ' • Published %s' "$published" )" >> "$out_dir/index.html"
+    printf '%s\n' '          <article class="release-card" style="margin-top:18px;">' >> "$out_dir/index.html"
+    printf '            <p class="kicker">%s</p>\n' "$kicker" >> "$out_dir/index.html"
+    printf '            <h2 class="release-title">%s</h2>\n' "$(html_escape "$name")" >> "$out_dir/index.html"
+    printf '            <p class="meta">Tag <code>%s</code>%s</p>\n' "$tag" "$( [ -n "$published" ] && printf ' • Published %s' "$published" )" >> "$out_dir/index.html"
     if [ -n "$body" ]; then
-      printf '        <p class="meta">%s</p>\n' "$(html_escape "$body")" >> "$out_dir/index.html"
+      printf '            <p class="meta">%s</p>\n' "$(html_escape "$body")" >> "$out_dir/index.html"
     fi
-    printf '%s\n' '        <ul class="assets">' >> "$out_dir/index.html"
+    printf '%s\n' '            <ul class="assets">' >> "$out_dir/index.html"
 
     shopt -s nullglob
     assets=("$release_dir"/*)
     shopt -u nullglob
     if [ "${#assets[@]}" -eq 0 ]; then
-      printf '%s\n' '          <li><span>No assets attached</span><span class="asset-size"></span></li>' >> "$out_dir/index.html"
+      printf '%s\n' '              <li><span>No assets attached</span><span class="asset-size"></span></li>' >> "$out_dir/index.html"
     else
       for asset_path in "${assets[@]}"; do
         asset_name="$(basename "$asset_path")"
         asset_size="$(wc -c < "$asset_path" | tr -d ' ')"
-        printf '          <li><a href="downloads/%s/%s">%s</a><span class="asset-size">%s bytes</span></li>\n' \
+        printf '              <li><a href="downloads/%s/%s">%s</a><span class="asset-size">%s bytes</span></li>\n' \
           "$tag" "$asset_name" "$asset_name" "$asset_size" >> "$out_dir/index.html"
       done
     fi
 
-    printf '%s\n' '        </ul>' >> "$out_dir/index.html"
-    printf '%s\n' '      </article>' >> "$out_dir/index.html"
+    printf '%s\n' '            </ul>' >> "$out_dir/index.html"
+    printf '%s\n' '          </article>' >> "$out_dir/index.html"
   done
-  printf '%s\n' '    </section>' >> "$out_dir/index.html"
 fi
 
 cat >> "$out_dir/index.html" <<EOF
+        </article>
+      </div>
+      <aside>
+        <article class="section-card">
+          <p class="kicker">Verification</p>
+          <h3 class="section-title">Check Linux artifacts</h3>
+          <p class="section-copy">Download the matching <code>SHA256SUMS</code>, <code>.sig</code>, and <code>.pem</code> files from the latest release, then verify with <code>cosign verify-blob</code>.</p>
+        </article>
+        <article class="section-card">
+          <p class="kicker">Support</p>
+          <h3 class="section-title">Need help?</h3>
+          <p class="section-copy">If a release fails to run or verify, open an issue in the project workflow or contact maintainer directly.</p>
+        </article>
+      </aside>
+    </section>
+
     <p class="footer">Source repo: <a href="https://github.com/$repo">$repo</a></p>
   </main>
 </body>
