@@ -37,6 +37,7 @@ Do not commit SDK source, `vendor/`, or local `replace` directives.
 
 GitHub Actions builds release packages for Linux, macOS, and Windows when a `v*` tag is pushed.
 Linux artifacts include SHA256 checksums and keyless Sigstore signatures.
+Published releases are mirrored to GitHub Pages as public binary downloads, so repo can stay private.
 
 Required repository secret:
 
@@ -47,3 +48,9 @@ SSH_KEY_SDK
 Set it to read-only deploy key private half for `bitcoinsv-sdk-go`.
 
 Verify Linux release artifact signatures with `cosign verify-blob`, using matching `.sig` and `.pem` assets.
+
+## Pages
+
+`Pages` workflow builds simple public downloads site from published GitHub releases.
+Enable GitHub Pages in repo settings with source set to GitHub Actions.
+Pages content contains release binaries and signatures only, not source.
