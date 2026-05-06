@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -49,5 +50,46 @@ func TestLoadRejectsWrongPassphrase(t *testing.T) {
 	_, err := Load(path, "wrong")
 	if !errors.Is(err, ErrInvalidPassphrase) {
 		t.Fatalf("expected ErrInvalidPassphrase, got %v", err)
+	}
+}
+
+func TestWalletNamesAndPaths(t *testing.T) {
+	baseDir := t.TempDir()
+	if err := os.MkdirAll(WalletsDir(baseDir), 0o700); err != nil {
+		t.Fatalf("mkdir wallets dir: %v", err)
+	}
+	for _, name := range []string{"alice", "bob"} {
+		path := WalletPath(baseDir, name)
+		if err := SaveWithKDF(path, "passphrase", DefaultPayload("test"), KDF{Algorithm: "argon2id", Time: 1, MemoryKB: 1024, Threads: 1, KeyBytes: 32}); err != nil {
+			t.Fatalf("save %s: %v", name, err)
+		}
+	}
+	if err := SaveWithKDF(LegacyPath(baseDir), "passphrase", DefaultPayload("test"), KDF{Algorithm: "argon2id", Time: 1, MemoryKB: 1024, Threads: 1, KeyBytes: 32}); err != nil {
+		t.Fatalf("save legacy: %v", err)
+	}
+	names, err := ListWalletNames(baseDir)
+	if err != nil {
+		t.Fatalf("list wallet names: %v", err)
+	}
+	want := []string{"alice", "bob", "default"}
+	if len(names) != len(want) {
+		t.Fatalf("wallet count: got %v want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("wallet names: got %v want %v", names, want)
+		}
+	}
+	if got := WalletPath(baseDir, "default"); got != LegacyPath(baseDir) {
+		t.Fatalf("default wallet path: got %q want legacy path", got)
+	}
+}
+
+func TestNormalizeWalletName(t *testing.T) {
+	if _, err := NormalizeWalletName("my-wallet_01"); err != nil {
+		t.Fatalf("valid wallet name rejected: %v", err)
+	}
+	if _, err := NormalizeWalletName("bad name"); err == nil {
+		t.Fatal("expected invalid wallet name error")
 	}
 }

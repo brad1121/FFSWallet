@@ -9,11 +9,11 @@ import (
 )
 
 func main() {
-	path, err := store.DefaultPath()
+	dir, err := store.DefaultDir()
 	if err != nil {
 		log.Fatal(err)
 	}
-	svc := walletapp.NewService(path)
+	svc := walletapp.NewService(dir)
 	defer svc.Close()
 
 	ui.Run(svc)

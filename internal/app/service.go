@@ -68,6 +68,8 @@ type Snapshot struct {
 type Service struct {
 	mu sync.RWMutex
 
+	baseDir    string
+	walletName string
 	path       string
 	passphrase string
 	payload    *store.Payload
@@ -78,10 +80,10 @@ type Service struct {
 	statusStop chan struct{}
 }
 
-func NewService(path string) *Service {
+func NewService(baseDir string) *Service {
 	return &Service{
-		path:   path,
-		events: make(chan Event, 128),
+		baseDir: baseDir,
+		events:  make(chan Event, 128),
 	}
 }
 
@@ -99,28 +101,68 @@ func (s *Service) WalletPath() string {
 	return s.path
 }
 
+func (s *Service) WalletName() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.walletName
+}
+
+func (s *Service) WalletNames() []string {
+	names, _ := store.ListWalletNames(s.baseDir)
+	return names
+}
+
+func (s *Service) HasWallets() bool {
+	return len(s.WalletNames()) > 0
+}
+
+func (s *Service) SelectWallet(name string) error {
+	name, err := store.NormalizeWalletName(name)
+	if err != nil {
+		return err
+	}
+	path := store.WalletPath(s.baseDir, name)
+	if !store.Exists(path) {
+		return fmt.Errorf("wallet %q not found", name)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopRuntimeLocked(true)
+	s.walletName = name
+	s.path = path
+	return nil
+}
+
 func (s *Service) WalletExists() bool {
 	return store.Exists(s.path)
 }
 
-func (s *Service) CreateWallet(passphrase, network string) (string, error) {
+func (s *Service) CreateWallet(name, passphrase, network string) (string, error) {
 	if strings.TrimSpace(passphrase) == "" {
 		return "", errors.New("passphrase required")
 	}
+	name, path, err := s.newWalletTarget(name)
+	if err != nil {
+		return "", err
+	}
 	network = NormalizeNetwork(network)
 	payload := store.DefaultPayload(network)
+	payload.WalletName = name
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stopRuntimeLocked(false)
 
 	node := newNode(payload)
-	wallet, mnemonic, err := node.CreateWallet(payload.WalletName)
+	wallet, mnemonic, err := node.CreateWallet(name)
 	if err != nil {
 		return "", fmt.Errorf("create sdk wallet: %w", err)
 	}
 	payload.Mnemonic = mnemonic
 
+	s.walletName = name
+	s.path = path
 	s.passphrase = passphrase
 	s.payload = payload
 	s.node = node
@@ -143,17 +185,21 @@ func (s *Service) CreateWallet(passphrase, network string) (string, error) {
 	return mnemonic, nil
 }
 
-func (s *Service) RestoreWallet(mnemonic, passphrase, network string) error {
-	return s.createWalletFromMnemonic(mnemonic, passphrase, network, "wallet restored")
+func (s *Service) RestoreWallet(name, mnemonic, passphrase, network string) error {
+	return s.createWalletFromMnemonic(name, mnemonic, passphrase, network, "wallet restored")
 }
 
-func (s *Service) CreateWalletFromSeed(seedWords, passphrase, network string) error {
-	return s.createWalletFromMnemonic(seedWords, passphrase, network, "wallet created from seed")
+func (s *Service) CreateWalletFromSeed(name, seedWords, passphrase, network string) error {
+	return s.createWalletFromMnemonic(name, seedWords, passphrase, network, "wallet created from seed")
 }
 
-func (s *Service) createWalletFromMnemonic(mnemonic, passphrase, network, eventMessage string) error {
+func (s *Service) createWalletFromMnemonic(name, mnemonic, passphrase, network, eventMessage string) error {
 	if strings.TrimSpace(passphrase) == "" {
 		return errors.New("passphrase required")
+	}
+	name, path, err := s.newWalletTarget(name)
+	if err != nil {
+		return err
 	}
 	mnemonic = normalizeMnemonic(mnemonic)
 	if mnemonic == "" {
@@ -161,6 +207,7 @@ func (s *Service) createWalletFromMnemonic(mnemonic, passphrase, network, eventM
 	}
 	network = NormalizeNetwork(network)
 	payload := store.DefaultPayload(network)
+	payload.WalletName = name
 	payload.Mnemonic = mnemonic
 
 	s.mu.Lock()
@@ -168,10 +215,12 @@ func (s *Service) createWalletFromMnemonic(mnemonic, passphrase, network, eventM
 	s.stopRuntimeLocked(false)
 
 	node := newNode(payload)
-	wallet, err := node.RestoreWallet(payload.WalletName, mnemonic, "")
+	wallet, err := node.RestoreWallet(name, mnemonic, "")
 	if err != nil {
 		return fmt.Errorf("restore sdk wallet: %w", err)
 	}
+	s.walletName = name
+	s.path = path
 	s.passphrase = passphrase
 	s.payload = payload
 	s.node = node
@@ -198,6 +247,9 @@ func (s *Service) Unlock(passphrase string) error {
 	if strings.TrimSpace(passphrase) == "" {
 		return errors.New("passphrase required")
 	}
+	if s.path == "" {
+		return errors.New("select wallet first")
+	}
 	payload, err := store.Load(s.path, passphrase)
 	if err != nil {
 		return err
@@ -219,6 +271,18 @@ func (s *Service) Lock() {
 	defer s.mu.Unlock()
 	s.stopRuntimeLocked(true)
 	s.publishLocked(EventWallet, "wallet locked")
+}
+
+func (s *Service) newWalletTarget(name string) (string, string, error) {
+	name, err := store.NormalizeWalletName(name)
+	if err != nil {
+		return "", "", err
+	}
+	path := store.WalletPath(s.baseDir, name)
+	if store.Exists(path) {
+		return "", "", fmt.Errorf("wallet %q already exists", name)
+	}
+	return name, path, nil
 }
 
 func (s *Service) NewReceiveAddress() (string, error) {

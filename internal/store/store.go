@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -27,12 +29,82 @@ func DefaultKDF() KDF {
 	}
 }
 
-func DefaultPath() (string, error) {
+func DefaultDir() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("user config dir: %w", err)
 	}
-	return filepath.Join(dir, "FFSWallet", "wallet.json"), nil
+	return filepath.Join(dir, "FFSWallet"), nil
+}
+
+func DefaultPath() (string, error) {
+	dir, err := DefaultDir()
+	if err != nil {
+		return "", err
+	}
+	return LegacyPath(dir), nil
+}
+
+func LegacyPath(baseDir string) string {
+	return filepath.Join(baseDir, "wallet.json")
+}
+
+func WalletsDir(baseDir string) string {
+	return filepath.Join(baseDir, "wallets")
+}
+
+func WalletPath(baseDir, name string) string {
+	if name == "default" {
+		legacy := LegacyPath(baseDir)
+		current := filepath.Join(WalletsDir(baseDir), name+".json")
+		if Exists(legacy) && !Exists(current) {
+			return legacy
+		}
+	}
+	return filepath.Join(WalletsDir(baseDir), name+".json")
+}
+
+func NormalizeWalletName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("wallet name required")
+	}
+	for _, r := range name {
+		isLetter := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
+		isDigit := r >= '0' && r <= '9'
+		if isLetter || isDigit || r == '-' || r == '_' {
+			continue
+		}
+		return "", errors.New("wallet name must use letters, numbers, hyphen, or underscore")
+	}
+	return name, nil
+}
+
+func ListWalletNames(baseDir string) ([]string, error) {
+	names := map[string]struct{}{}
+	entries, err := os.ReadDir(WalletsDir(baseDir))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("read wallets dir: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if filepath.Ext(name) != ".json" {
+			continue
+		}
+		names[strings.TrimSuffix(name, ".json")] = struct{}{}
+	}
+	if Exists(LegacyPath(baseDir)) {
+		names["default"] = struct{}{}
+	}
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func Exists(path string) bool {
