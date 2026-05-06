@@ -397,7 +397,6 @@ cat > "$out_dir/index.html" <<EOF
         <div class="brand-mark">F</div>
         <div class="brand-copy">
           <h1>FFSWallet</h1>
-          <p>Private desktop wallet. Public binary downloads.</p>
         </div>
       </div>
       <nav class="toplinks">
@@ -429,11 +428,6 @@ cat > "$out_dir/index.html" <<EOF
           <p class="meta">$latest_tag_html</p>
           $latest_published_html
           $latest_body_html
-        </article>
-        <article class="release-card">
-          <p class="kicker">Why This Site</p>
-          <p class="meta">Release binaries and signatures are public here. Source code stays out of the download site.</p>
-          <p class="meta">Linux builds include <code>SHA256SUMS</code> and Sigstore keyless signatures.</p>
         </article>
       </aside>
     </section>
@@ -518,11 +512,6 @@ cat >> "$out_dir/index.html" <<EOF
           <p class="kicker">Verification</p>
           <h3 class="section-title">Check Linux artifacts</h3>
           <p class="section-copy">Download the matching <code>SHA256SUMS</code>, <code>.sig</code>, and <code>.pem</code> files from the latest release, then verify with <code>cosign verify-blob</code>.</p>
-        </article>
-        <article class="section-card">
-          <p class="kicker">Support</p>
-          <h3 class="section-title">Need help?</h3>
-          <p class="section-copy">If a release fails to run or verify, open an issue in the project workflow or contact maintainer directly.</p>
         </article>
       </aside>
     </section>
