@@ -113,18 +113,39 @@ jobs:
 
           mkdir -p release
           goarch="$(go env GOARCH)"
+          app_version="0.0.0"
+          if [ -n "${GITHUB_REF_NAME:-}" ] && [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            app_version="${GITHUB_REF_NAME#v}"
+          fi
           icon="$PWD/assets/icon.png"
           if command -v cygpath >/dev/null 2>&1; then
             icon="$(cygpath -m "$icon")"
           fi
 
-          go run fyne.io/tools/cmd/fyne@latest package \
-            --target "${{ matrix.target }}" \
-            --name FFSWallet \
-            --icon "$icon" \
-            --app-id com.ffswallet.desktop \
-            --release \
-            --src ./cmd/ffswallet
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            win_exe="$PWD/release/FFSWallet.exe"
+            if command -v cygpath >/dev/null 2>&1; then
+              win_exe="$(cygpath -m "$win_exe")"
+            fi
+            go run fyne.io/tools/cmd/fyne@latest package \
+              --target "${{ matrix.target }}" \
+              --name FFSWallet \
+              --icon "$icon" \
+              --app-id com.ffswallet.desktop \
+              --app-version "$app_version" \
+              --release \
+              --src ./cmd/ffswallet \
+              --executable "$win_exe"
+          else
+            go run fyne.io/tools/cmd/fyne@latest package \
+              --target "${{ matrix.target }}" \
+              --name FFSWallet \
+              --icon "$icon" \
+              --app-id com.ffswallet.desktop \
+              --app-version "$app_version" \
+              --release \
+              --src ./cmd/ffswallet
+          fi
 
           case "${{ runner.os }}" in
             Linux)
@@ -162,12 +183,11 @@ jobs:
               ditto -c -k --keepParent FFSWallet.app "release/FFSWallet-macos-${goarch}.zip"
               ;;
             Windows)
-              win_exe="$(powershell.exe -NoProfile -Command "(Get-ChildItem -File -Filter '*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName)")"
-              if [ -z "$win_exe" ]; then
-                printf '%s\n' 'No Windows executable produced by fyne package.'
+              if [ ! -f "release/FFSWallet.exe" ]; then
+                printf '%s\n' 'Expected Windows executable missing at release/FFSWallet.exe.'
                 exit 1
               fi
-              powershell.exe -NoProfile -Command "Compress-Archive -Path \"$win_exe\" -DestinationPath \"release/FFSWallet-windows-${goarch}.zip\" -Force"
+              mv "release/FFSWallet.exe" "release/FFSWallet-windows-${goarch}.exe"
               ;;
           esac
 

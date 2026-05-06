@@ -38,6 +38,7 @@ Do not commit SDK source, `vendor/`, or local `replace` directives.
 GitHub Actions builds release packages for Linux, macOS, and Windows when a `v*` tag is pushed.
 Linux artifacts include SHA256 checksums and keyless Sigstore signatures.
 Published releases are mirrored to GitHub Pages as public binary downloads, so repo can stay private.
+Use semantic version tags. First release tag should be `v0.0.1`.
 
 Required repository secret:
 
