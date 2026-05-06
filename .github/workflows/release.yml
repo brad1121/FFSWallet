@@ -162,7 +162,12 @@ jobs:
               ditto -c -k --keepParent FFSWallet.app "release/FFSWallet-macos-${goarch}.zip"
               ;;
             Windows)
-              powershell.exe -NoProfile -Command "Compress-Archive -Path 'FFSWallet.exe' -DestinationPath 'release/FFSWallet-windows-${goarch}.zip' -Force"
+              win_exe="$(powershell.exe -NoProfile -Command "(Get-ChildItem -File -Filter '*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName)")"
+              if [ -z "$win_exe" ]; then
+                printf '%s\n' 'No Windows executable produced by fyne package.'
+                exit 1
+              fi
+              powershell.exe -NoProfile -Command "Compress-Archive -Path \"$win_exe\" -DestinationPath \"release/FFSWallet-windows-${goarch}.zip\" -Force"
               ;;
           esac
 
