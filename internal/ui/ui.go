@@ -36,8 +36,9 @@ type UI struct {
 	addressBox *fyne.Container
 	utxoBox    *fyne.Container
 	historyBox *fyne.Container
-	eventEntry *widget.Entry
+	eventEntry *widget.Label
 	events     []string
+	eventSeen  map[string]struct{}
 	lastAddrs  []store.AddressRecord
 	lastUTXOs  []store.UTXORecord
 	lastTxs    []store.TxRecord
@@ -47,9 +48,10 @@ type UI struct {
 func Run(svc *walletapp.Service) {
 	a := fyneapp.NewWithID("com.ffswallet.desktop")
 	u := &UI{
-		svc:    svc,
-		app:    a,
-		closed: make(chan struct{}),
+		svc:       svc,
+		app:       a,
+		closed:    make(chan struct{}),
+		eventSeen: make(map[string]struct{}),
 	}
 	u.win = a.NewWindow("FFSWallet")
 	u.win.Resize(fyne.NewSize(1040, 700))
@@ -377,9 +379,8 @@ func (u *UI) showMain() {
 	u.addressBox = container.NewVBox()
 	u.utxoBox = container.NewVBox()
 	u.historyBox = container.NewVBox()
-	u.eventEntry = widget.NewMultiLineEntry()
-	u.eventEntry.SetMinRowsVisible(8)
-	u.eventEntry.Disable()
+	u.eventEntry = widget.NewLabel("")
+	u.eventEntry.Wrapping = fyne.TextWrapBreak
 
 	top := container.NewGridWithColumns(4,
 		u.balanceLabel,
@@ -428,7 +429,7 @@ func (u *UI) dashboardTab() fyne.CanvasObject {
 		nil,
 		nil,
 		nil,
-		u.eventEntry,
+		container.NewVScroll(u.eventEntry),
 	)
 }
 
@@ -554,6 +555,68 @@ func (u *UI) settingsTab() fyne.CanvasObject {
 	name := widget.NewLabel(u.svc.WalletName())
 	path := widget.NewLabel(u.svc.WalletPath())
 	path.Wrapping = fyne.TextWrapBreak
+	snap := u.svc.Snapshot()
+	feeEntry := widget.NewEntry()
+	feeEntry.SetPlaceHolder("sat/byte")
+	feeEntry.SetText(strconv.FormatInt(snap.FeePerByte, 10))
+	feeStatus := widget.NewLabel("")
+	feeStatus.Wrapping = fyne.TextWrapWord
+	saveFee := widget.NewButtonWithIcon("Save fee", theme.DocumentSaveIcon(), nil)
+	saveFee.OnTapped = func() {
+		fee, err := strconv.ParseInt(strings.TrimSpace(feeEntry.Text), 10, 64)
+		if err != nil || fee <= 0 {
+			dialog.ShowError(fmt.Errorf("fee must be a positive integer in sat/byte"), u.win)
+			return
+		}
+		saveFee.Disable()
+		feeStatus.SetText("Saving fee rate...")
+		go func() {
+			err := u.svc.SetFeePerByte(fee)
+			fyne.Do(func() {
+				saveFee.Enable()
+				if err != nil {
+					feeStatus.SetText("")
+					dialog.ShowError(err, u.win)
+					return
+				}
+				feeStatus.SetText(fmt.Sprintf("Fee rate saved: %d sat/byte", fee))
+				u.refresh()
+			})
+		}()
+	}
+	feeEntry.OnSubmitted = func(string) {
+		saveFee.OnTapped()
+	}
+	peerAddr := widget.NewEntry()
+	peerAddr.SetPlaceHolder("host:port")
+	peerStatus := widget.NewLabel("")
+	peerStatus.Wrapping = fyne.TextWrapWord
+	addPeer := widget.NewButtonWithIcon("Add peer", theme.ContentAddIcon(), nil)
+	addPeer.OnTapped = func() {
+		addr := strings.TrimSpace(peerAddr.Text)
+		if addr == "" {
+			dialog.ShowError(fmt.Errorf("peer address required"), u.win)
+			return
+		}
+		addPeer.Disable()
+		peerStatus.SetText("Dialing peer...")
+		go func() {
+			err := u.svc.AddPeer(addr)
+			fyne.Do(func() {
+				addPeer.Enable()
+				if err != nil {
+					peerStatus.SetText("")
+					dialog.ShowError(err, u.win)
+					return
+				}
+				peerStatus.SetText("Peer dial started: " + addr)
+				peerAddr.SetText("")
+			})
+		}()
+	}
+	peerAddr.OnSubmitted = func(string) {
+		addPeer.OnTapped()
+	}
 	return container.NewVBox(
 		widget.NewLabelWithStyle("Wallet name", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		name,
@@ -563,6 +626,19 @@ func (u *UI) settingsTab() fyne.CanvasObject {
 		widget.NewSeparator(),
 		widget.NewLabel("Default network: testnet"),
 		widget.NewLabel("Storage: encrypted local file"),
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Transaction fee", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewLabel("Manual fee rate in satoshis per byte."),
+		feeEntry,
+		saveFee,
+		feeStatus,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Manual peer dial", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewLabel("Add a peer directly using host:port."),
+		peerAddr,
+		addPeer,
+		peerStatus,
+		widget.NewSeparator(),
 		lock,
 	)
 }
@@ -599,6 +675,13 @@ func (u *UI) refresh() {
 func (u *UI) addEvent(ev walletapp.Event) {
 	if u.eventEntry == nil {
 		return
+	}
+	if ev.Type == walletapp.EventPayment {
+		key := string(ev.Type) + ":" + ev.Message
+		if _, exists := u.eventSeen[key]; exists {
+			return
+		}
+		u.eventSeen[key] = struct{}{}
 	}
 	line := fmt.Sprintf("%s  %s", ev.At.Local().Format("15:04:05"), ev.Message)
 	u.events = append([]string{line}, u.events...)

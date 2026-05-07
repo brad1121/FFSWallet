@@ -273,6 +273,46 @@ func (s *Service) Lock() {
 	s.publishLocked(EventWallet, "wallet locked")
 }
 
+func (s *Service) AddPeer(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return errors.New("peer address required")
+	}
+
+	s.mu.RLock()
+	node := s.node
+	s.mu.RUnlock()
+	if node == nil {
+		return errors.New("wallet locked")
+	}
+	if err := node.ConnectPeer(addr); err != nil {
+		return err
+	}
+	s.publish(EventPeer, "manual peer dial: "+addr)
+	return nil
+}
+
+func (s *Service) SetFeePerByte(fee int64) error {
+	if fee <= 0 {
+		return errors.New("fee rate must be positive")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.payload == nil {
+		return errors.New("wallet locked")
+	}
+	s.payload.FeePerByte = fee
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	if s.wallet != nil {
+		s.resetRuntimeFromPayloadLocked()
+	}
+	s.publishLocked(EventStatus, fmt.Sprintf("fee rate set to %d sat/byte", fee))
+	return nil
+}
+
 func (s *Service) newWalletTarget(name string) (string, string, error) {
 	name, err := store.NormalizeWalletName(name)
 	if err != nil {
@@ -623,6 +663,11 @@ func (s *Service) wireRuntimeLocked(node *bsv.Node, wallet *bsv.Wallet) {
 		if s.wallet != wallet || s.payload == nil {
 			return
 		}
+		for _, existing := range s.payload.UTXOs {
+			if existing.TxID == p.TxID && existing.Vout == p.Vout {
+				return
+			}
+		}
 		s.refreshUTXOsLocked()
 		s.appendHistoryLocked(store.TxRecord{
 			TxID:      p.TxID,
@@ -638,7 +683,7 @@ func (s *Service) wireRuntimeLocked(node *bsv.Node, wallet *bsv.Wallet) {
 			s.publishLocked(EventError, err.Error())
 			return
 		}
-		s.publishLocked(EventPayment, fmt.Sprintf("received %d sat at %s", p.Amount, p.Address))
+		s.publishLocked(EventPayment, fmt.Sprintf("received %d sat at %s (tx %s)", p.Amount, p.Address, shortTxID(p.TxID)))
 	})
 }
 
@@ -745,6 +790,9 @@ func (s *Service) publishLocked(kind EventType, message string) {
 func newNode(payload *store.Payload) *bsv.Node {
 	cfg := bsv.DefaultConfig()
 	cfg.MaxPeers = payload.MaxPeers
+	if cfg.MaxPeers < 16 {
+		cfg.MaxPeers = 16
+	}
 	cfg.FeePerByte = payload.FeePerByte
 	cfg.UserAgent = "/ffswallet:0.1/"
 	cfg.SkipBlockDownload = true
@@ -830,6 +878,13 @@ func parseDisplayBlockHash(input string) ([32]byte, error) {
 		hash[i] = raw[31-i]
 	}
 	return hash, nil
+}
+
+func shortTxID(txid string) string {
+	if len(txid) <= 16 {
+		return txid
+	}
+	return txid[:8] + "..." + txid[len(txid)-8:]
 }
 
 func currentReceiveAddress(records []store.AddressRecord) string {

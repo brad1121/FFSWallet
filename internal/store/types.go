@@ -74,7 +74,7 @@ func DefaultPayload(network string) *Payload {
 		WalletName: "default",
 		Network:    network,
 		FeePerByte: 1,
-		MaxPeers:   8,
+		MaxPeers:   16,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -94,7 +94,7 @@ func (p *Payload) EnsureDefaults() {
 		p.FeePerByte = 1
 	}
 	if p.MaxPeers <= 0 {
-		p.MaxPeers = 8
+		p.MaxPeers = 16
 	}
 	for _, a := range p.Addresses {
 		next := a.Index + 1
