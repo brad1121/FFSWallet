@@ -411,7 +411,7 @@ cat > "$out_dir/index.html" <<EOF
         <div class="hero-copy">
           <p class="kicker">Take Control</p>
           <h2>Bitcoin SV wallet with local control, seed recovery, and downloadable desktop builds.</h2>
-          <p>FFSWallet keeps source private while publishing signed binaries for Linux, macOS, and Windows. Import an existing seed, optionally rescan from a chosen block hash, and manage funds from a native desktop UI.</p>
+          <p>FFSWallet built for Linux, Windows, Mac is a no fuss p2p desktop wallet for BitcoinSV. It supports creating wallets from existing seed words, rescanning for missing UTXOs and handles your sending and receiving of BSV withouth third party services.</p>
           <div class="cta-row">
             <a class="button primary" href="#downloads">Download Latest Release</a>
             <a class="button secondary" href="#features">See Features</a>
