@@ -36,9 +36,11 @@ type UI struct {
 	addressBox *fyne.Container
 	utxoBox    *fyne.Container
 	historyBox *fyne.Container
-	eventEntry *widget.Label
+	eventEntry *widget.Entry
 	events     []string
 	eventSeen  map[string]struct{}
+	eventText  string
+	eventSync  bool
 	lastAddrs  []store.AddressRecord
 	lastUTXOs  []store.UTXORecord
 	lastTxs    []store.TxRecord
@@ -267,6 +269,12 @@ func (u *UI) showRescanChoice(network string) {
 	startHash := widget.NewEntry()
 	startHash.SetPlaceHolder("Start block hash")
 	startHash.SetText(walletapp.DefaultRescanStartHash(network))
+	startHeight := widget.NewEntry()
+	startHeight.SetPlaceHolder("Start block height (optional)")
+	if height := walletapp.DefaultRescanStartHeight(network); height > 0 {
+		startHeight.SetText(strconv.FormatInt(int64(height), 10))
+	}
+	bindDefaultRescanHeight(startHash, startHeight, network)
 	status := widget.NewLabel("")
 	status.Wrapping = fyne.TextWrapWord
 	warning := widget.NewLabel("Rescan downloads and scans every block from the start hash. It can take hours. Skip if seed words have no previous activity.")
@@ -279,11 +287,19 @@ func (u *UI) showRescanChoice(network string) {
 	})
 	rescan := widget.NewButtonWithIcon("Start rescan", theme.ViewRefreshIcon(), nil)
 	rescan.OnTapped = func() {
+		height, err := parseRescanHeight(startHeight.Text)
+		if err != nil {
+			dialog.ShowError(err, u.win)
+			return
+		}
+		hash := startHash.Text
 		rescan.Disable()
 		skip.Disable()
 		status.SetText("Rescanning wallet. Keep app open.")
 		go func() {
-			msg, err := u.svc.RescanFromBlockHash(startHash.Text)
+			var msg string
+			var err error
+			msg, err = u.svc.RescanFromBlockHashAtHeight(hash, height)
 			fyne.Do(func() {
 				rescan.Enable()
 				skip.Enable()
@@ -302,7 +318,7 @@ func (u *UI) showRescanChoice(network string) {
 		widget.NewLabelWithStyle("Seed wallet created", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		warning,
 		defaultLabel,
-		widget.NewForm(widget.NewFormItem("Start hash", startHash)),
+		widget.NewForm(widget.NewFormItem("Start hash", startHash), widget.NewFormItem("Start height", startHeight)),
 		container.NewHBox(rescan, skip),
 		status,
 	)))
@@ -379,8 +395,16 @@ func (u *UI) showMain() {
 	u.addressBox = container.NewVBox()
 	u.utxoBox = container.NewVBox()
 	u.historyBox = container.NewVBox()
-	u.eventEntry = widget.NewLabel("")
+	u.eventEntry = widget.NewMultiLineEntry()
 	u.eventEntry.Wrapping = fyne.TextWrapBreak
+	u.eventEntry.SetPlaceHolder("Wallet and peer events appear here. Select text to copy.")
+	u.eventEntry.OnChanged = func(text string) {
+		if u.eventSync || text == u.eventText {
+			return
+		}
+		u.setEventText(u.eventText)
+	}
+	u.setEventText(strings.Join(u.events, "\n"))
 
 	top := container.NewGridWithColumns(4,
 		u.balanceLabel,
@@ -418,13 +442,24 @@ func (u *UI) dashboardTab() fyne.CanvasObject {
 			u.win.Clipboard().SetContent(snap.ReceiveAddress)
 		}
 	})
+	trafficToggle := widget.NewCheck("P2P traffic", nil)
+	trafficToggle.SetChecked(u.svc.P2PTrafficEnabled())
+	trafficToggle.OnChanged = func(enabled bool) {
+		u.svc.SetP2PTrafficEnabled(enabled)
+	}
+	eventsHeader := container.NewBorder(
+		nil,
+		nil,
+		widget.NewLabelWithStyle("Events", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		trafficToggle,
+	)
 	return container.NewBorder(
 		container.NewVBox(
 			widget.NewLabelWithStyle("Current receive address", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			u.addressLabel,
 			container.NewHBox(newAddr, copyAddr),
 			widget.NewSeparator(),
-			widget.NewLabelWithStyle("Events", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			eventsHeader,
 		),
 		nil,
 		nil,
@@ -544,7 +579,9 @@ func (u *UI) utxosTab() fyne.CanvasObject {
 }
 
 func (u *UI) historyTab() fyne.CanvasObject {
-	return container.NewBorder(nil, nil, nil, nil, container.NewVScroll(u.historyBox))
+	help := widget.NewLabel("Double-click a history row for transaction details and transaction link.")
+	help.Wrapping = fyne.TextWrapWord
+	return container.NewBorder(container.NewVBox(help, widget.NewSeparator()), nil, nil, nil, container.NewVScroll(u.historyBox))
 }
 
 func (u *UI) settingsTab() fyne.CanvasObject {
@@ -617,6 +654,97 @@ func (u *UI) settingsTab() fyne.CanvasObject {
 	peerAddr.OnSubmitted = func(string) {
 		addPeer.OnTapped()
 	}
+	rescanHash := widget.NewEntry()
+	rescanHash.SetPlaceHolder("64-character start block hash")
+	if defaultHash := walletapp.DefaultRescanStartHash(snap.Network); defaultHash != "" {
+		rescanHash.SetText(defaultHash)
+	}
+	rescanHeight := widget.NewEntry()
+	rescanHeight.SetPlaceHolder("Start block height (optional)")
+	if height := walletapp.DefaultRescanStartHeight(snap.Network); height > 0 {
+		rescanHeight.SetText(strconv.FormatInt(int64(height), 10))
+	}
+	bindDefaultRescanHeight(rescanHash, rescanHeight, snap.Network)
+	rescanHelp := widget.NewLabel(walletapp.DefaultRescanStartLabel(snap.Network))
+	rescanHelp.Wrapping = fyne.TextWrapWord
+	rescanRebuild := widget.NewCheck("Rebuild UTXOs first", nil)
+	rescanRebuild.SetChecked(true)
+	rescanRebuildHelp := widget.NewLabel("Recommended for stale balances, missing-input transactions, or local unconfirmed change that peers never accepted.")
+	rescanRebuildHelp.Wrapping = fyne.TextWrapWord
+	rescanStatus := widget.NewLabel("")
+	rescanStatus.Wrapping = fyne.TextWrapWord
+	var startRescan *widget.Button
+	startRescan = widget.NewButtonWithIcon("Start rescan", theme.ViewRefreshIcon(), nil)
+	startRescan.OnTapped = func() {
+		hash := strings.TrimSpace(rescanHash.Text)
+		if hash == "" {
+			dialog.ShowError(fmt.Errorf("start block hash required"), u.win)
+			return
+		}
+		height, err := parseRescanHeight(rescanHeight.Text)
+		if err != nil {
+			dialog.ShowError(err, u.win)
+			return
+		}
+		run := func() {
+			startRescan.Disable()
+			rescanStatus.SetText("Rescan running. Keep wallet open.")
+			go func() {
+				var msg string
+				var err error
+				if rescanRebuild.Checked {
+					msg, err = u.svc.RebuildFromBlockHashAtHeight(hash, height)
+				} else {
+					msg, err = u.svc.RescanFromBlockHashAtHeight(hash, height)
+				}
+				fyne.Do(func() {
+					startRescan.Enable()
+					if err != nil {
+						rescanStatus.SetText("")
+						dialog.ShowError(err, u.win)
+						return
+					}
+					rescanStatus.SetText(msg)
+					u.refresh()
+				})
+			}()
+		}
+		if !rescanRebuild.Checked {
+			run()
+			return
+		}
+		dialog.ShowConfirm("Confirm rebuild rescan", "This clears local UTXOs before scanning blocks, then rebuilds wallet balance from confirmed chain data. Continue?", func(ok bool) {
+			if ok {
+				run()
+			}
+		}, u.win)
+	}
+	rescanHash.OnSubmitted = func(string) {
+		startRescan.OnTapped()
+	}
+	rebroadcastStatus := widget.NewLabel("")
+	rebroadcastStatus.Wrapping = fyne.TextWrapWord
+	var rebroadcast *widget.Button
+	rebroadcast = widget.NewButtonWithIcon("Rebroadcast pending", theme.ViewRefreshIcon(), func() {
+		rebroadcast.Disable()
+		rebroadcastStatus.SetText("Rebroadcasting pending transactions...")
+		go func() {
+			count, err := u.svc.RebroadcastPending()
+			fyne.Do(func() {
+				rebroadcast.Enable()
+				if err != nil {
+					rebroadcastStatus.SetText("")
+					dialog.ShowError(err, u.win)
+					return
+				}
+				if count == 0 {
+					rebroadcastStatus.SetText("No stored pending transactions to rebroadcast.")
+					return
+				}
+				rebroadcastStatus.SetText(fmt.Sprintf("Rebroadcast %d pending transaction(s).", count))
+			})
+		}()
+	})
 	return container.NewVBox(
 		widget.NewLabelWithStyle("Wallet name", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		name,
@@ -638,6 +766,20 @@ func (u *UI) settingsTab() fyne.CanvasObject {
 		peerAddr,
 		addPeer,
 		peerStatus,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Wallet rescan", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		rescanHelp,
+		rescanHash,
+		rescanHeight,
+		rescanRebuild,
+		rescanRebuildHelp,
+		startRescan,
+		rescanStatus,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Pending transactions", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewLabel("Push stored broadcast transactions to connected peers again."),
+		rebroadcast,
+		rebroadcastStatus,
 		widget.NewSeparator(),
 		lock,
 	)
@@ -685,10 +827,20 @@ func (u *UI) addEvent(ev walletapp.Event) {
 	}
 	line := fmt.Sprintf("%s  %s", ev.At.Local().Format("15:04:05"), ev.Message)
 	u.events = append([]string{line}, u.events...)
-	if len(u.events) > 80 {
-		u.events = u.events[:80]
+	if len(u.events) > 1000 {
+		u.events = u.events[:1000]
 	}
-	u.eventEntry.SetText(strings.Join(u.events, "\n"))
+	u.setEventText(strings.Join(u.events, "\n"))
+}
+
+func (u *UI) setEventText(text string) {
+	u.eventText = text
+	if u.eventEntry == nil {
+		return
+	}
+	u.eventSync = true
+	u.eventEntry.SetText(text)
+	u.eventSync = false
 }
 
 func (u *UI) fillAddresses(records []store.AddressRecord) {
@@ -739,9 +891,13 @@ func (u *UI) fillHistory(records []store.TxRecord) {
 	}
 	rows := make([]fyne.CanvasObject, 0, len(records))
 	for _, rec := range records {
-		label := widget.NewLabel(fmt.Sprintf("%s  %s  %s  %s", rec.SeenAt.Local().Format("2006-01-02 15:04"), rec.Direction, formatSats(rec.Amount), short(rec.TxID)))
-		label.Wrapping = fyne.TextWrapBreak
-		rows = append(rows, label, widget.NewSeparator())
+		tx := rec
+		button := newDoubleTapButton(fmt.Sprintf("%s  %s  %s  %s  %s", rec.SeenAt.Local().Format("2006-01-02 15:04"), rec.Direction, formatSats(rec.Amount), rec.Status, short(rec.TxID)), func() {
+			u.showHistoryDetail(tx)
+		})
+		button.Alignment = widget.ButtonAlignLeading
+		button.Importance = widget.LowImportance
+		rows = append(rows, button, widget.NewSeparator())
 	}
 	if len(rows) == 0 {
 		rows = append(rows, widget.NewLabel("No history"))
@@ -755,11 +911,11 @@ func (u *UI) showUTXODetail(rec store.UTXORecord) {
 	content := []fyne.CanvasObject{
 		widget.NewLabelWithStyle("UTXO details", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewForm(
-			widget.NewFormItem("TxID", widget.NewLabel(rec.TxID)),
-			widget.NewFormItem("Vout", widget.NewLabel(strconv.FormatUint(uint64(rec.Vout), 10))),
-			widget.NewFormItem("Value", widget.NewLabel(formatSats(rec.Value))),
-			widget.NewFormItem("Height", widget.NewLabel(strconv.FormatInt(int64(rec.Height), 10))),
-			widget.NewFormItem("Seen", widget.NewLabel(rec.SeenAt.Local().Format("2006-01-02 15:04:05"))),
+			widget.NewFormItem("TxID", selectableText(rec.TxID)),
+			widget.NewFormItem("Vout", selectableText(strconv.FormatUint(uint64(rec.Vout), 10))),
+			widget.NewFormItem("Value", selectableText(formatSats(rec.Value))),
+			widget.NewFormItem("Height", selectableText(strconv.FormatInt(int64(rec.Height), 10))),
+			widget.NewFormItem("Seen", selectableText(rec.SeenAt.Local().Format("2006-01-02 15:04:05"))),
 		),
 	}
 	if rec.ScriptHex != "" {
@@ -779,6 +935,49 @@ func (u *UI) showUTXODetail(rec store.UTXORecord) {
 		content = append(content, widget.NewHyperlink("Open transaction in WhatsOnChain", link))
 	}
 	dlg := dialog.NewCustom("UTXO details", "Close", container.NewVScroll(container.NewVBox(content...)), u.win)
+	size := u.win.Canvas().Size()
+	dlg.Resize(fyne.NewSize(size.Width*0.8, size.Height*0.8))
+	dlg.Show()
+}
+
+func (u *UI) showHistoryDetail(rec store.TxRecord) {
+	snap := u.svc.Snapshot()
+	items := []*widget.FormItem{
+		widget.NewFormItem("TxID", selectableText(rec.TxID)),
+		widget.NewFormItem("Direction", selectableText(rec.Direction)),
+		widget.NewFormItem("Address", selectableText(rec.Address)),
+		widget.NewFormItem("Amount", selectableText(formatSats(rec.Amount))),
+		widget.NewFormItem("Height", selectableText(strconv.FormatInt(int64(rec.Height), 10))),
+		widget.NewFormItem("Status", selectableText(rec.Status)),
+		widget.NewFormItem("Seen", selectableText(rec.SeenAt.Local().Format("2006-01-02 15:04:05"))),
+	}
+	if rec.Direction == "in" || rec.Vout != 0 {
+		items = append(items, widget.NewFormItem("Vout", selectableText(strconv.FormatUint(uint64(rec.Vout), 10))))
+	}
+	if rec.Note != "" {
+		items = append(items, widget.NewFormItem("Note", selectableText(rec.Note)))
+	}
+
+	content := []fyne.CanvasObject{
+		widget.NewLabelWithStyle("Transaction details", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewForm(items...),
+	}
+
+	accordion := widget.NewAccordion(
+		widget.NewAccordionItem("Decoded wallet details", codeBlock(historyDetailJSON(rec, snap.UTXOs))),
+	)
+	accordion.Open(0)
+	content = append(content, accordion)
+	if rec.RawHex != "" {
+		content = append(content,
+			widget.NewLabelWithStyle("Raw transaction hex", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			codeBlock(rec.RawHex),
+		)
+	}
+	if link := whatsOnChainTxURL(snap.Network, rec.TxID); link != nil {
+		content = append(content, widget.NewHyperlink("Open transaction in WhatsOnChain", link))
+	}
+	dlg := dialog.NewCustom("Transaction details", "Close", container.NewVScroll(container.NewVBox(content...)), u.win)
 	size := u.win.Canvas().Size()
 	dlg.Resize(fyne.NewSize(size.Width*0.8, size.Height*0.8))
 	dlg.Show()
@@ -817,10 +1016,60 @@ func utxoDetailJSON(rec store.UTXORecord, history []store.TxRecord) string {
 	return string(raw)
 }
 
+func historyDetailJSON(rec store.TxRecord, utxos []store.UTXORecord) string {
+	matched := make([]store.UTXORecord, 0, 2)
+	for _, utxo := range utxos {
+		if utxo.TxID == rec.TxID {
+			matched = append(matched, utxo)
+		}
+	}
+	payload := struct {
+		History     store.TxRecord     `json:"history"`
+		AmountBSV   string             `json:"amount_bsv"`
+		WalletUTXOs []store.UTXORecord `json:"wallet_utxos,omitempty"`
+	}{
+		History:     rec,
+		AmountBSV:   fmt.Sprintf("%.8f", float64(rec.Amount)/100000000),
+		WalletUTXOs: matched,
+	}
+	raw, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("{\n  \"error\": %q\n}", err.Error())
+	}
+	return string(raw)
+}
+
 func codeBlock(text string) fyne.CanvasObject {
-	label := widget.NewLabel(text)
-	label.Wrapping = fyne.TextWrapBreak
-	return widget.NewCard("", "", label)
+	return widget.NewCard("", "", selectableMultilineText(text))
+}
+
+func selectableText(text string) *widget.Entry {
+	entry := widget.NewMultiLineEntry()
+	entry.Wrapping = fyne.TextWrapBreak
+	entry.SetMinRowsVisible(1)
+	entry.SetText(text)
+	makeReadOnlyEntry(entry, text)
+	return entry
+}
+
+func selectableMultilineText(text string) *widget.Entry {
+	entry := widget.NewMultiLineEntry()
+	entry.Wrapping = fyne.TextWrapBreak
+	entry.SetText(text)
+	makeReadOnlyEntry(entry, text)
+	return entry
+}
+
+func makeReadOnlyEntry(entry *widget.Entry, text string) {
+	var syncing bool
+	entry.OnChanged = func(value string) {
+		if syncing || value == text {
+			return
+		}
+		syncing = true
+		entry.SetText(text)
+		syncing = false
+	}
 }
 
 func whatsOnChainTxURL(network, txid string) *url.URL {
@@ -891,6 +1140,40 @@ func parseAmount(input, unit string) (int64, error) {
 		return 0, fmt.Errorf("invalid satoshi amount")
 	}
 	return sats, nil
+}
+
+func parseRescanHeight(input string) (int32, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return 0, nil
+	}
+	height, err := strconv.ParseInt(input, 10, 32)
+	if err != nil || height < 0 {
+		return 0, fmt.Errorf("invalid start block height")
+	}
+	return int32(height), nil
+}
+
+func bindDefaultRescanHeight(hashEntry, heightEntry *widget.Entry, network string) {
+	defaultHash := walletapp.DefaultRescanStartHash(network)
+	defaultHeight := walletapp.DefaultRescanStartHeight(network)
+	if defaultHash == "" || defaultHeight == 0 {
+		return
+	}
+	defaultHeightText := strconv.FormatInt(int64(defaultHeight), 10)
+	hashEntry.OnChanged = func(value string) {
+		hash := strings.ToLower(strings.TrimSpace(value))
+		height := strings.TrimSpace(heightEntry.Text)
+		if hash == defaultHash {
+			if height == "" {
+				heightEntry.SetText(defaultHeightText)
+			}
+			return
+		}
+		if height == defaultHeightText {
+			heightEntry.SetText("")
+		}
+	}
 }
 
 func parseBSV(input string) (int64, error) {

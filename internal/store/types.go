@@ -65,6 +65,7 @@ type TxRecord struct {
 	Status    string    `json:"status"`
 	SeenAt    time.Time `json:"seen_at"`
 	Note      string    `json:"note,omitempty"`
+	RawHex    string    `json:"raw_hex,omitempty"`
 }
 
 func DefaultPayload(network string) *Payload {

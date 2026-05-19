@@ -1,0 +1,149 @@
+package ui
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"fyne.io/fyne/v2/widget"
+
+	"github.com/brad1121/FFSWallet/internal/app"
+	"github.com/brad1121/FFSWallet/internal/store"
+)
+
+func TestParseAmount(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		unit  string
+		want  int64
+	}{
+		{name: "sats", input: "123", unit: "sats", want: 123},
+		{name: "bsv whole", input: "1", unit: "BSV", want: 100000000},
+		{name: "bsv decimal", input: "0.00000042", unit: "BSV", want: 42},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseAmount(tc.input, tc.unit)
+			if err != nil {
+				t.Fatalf("parse amount: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("amount: got %d want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseAmountRejectsInvalidInput(t *testing.T) {
+	for _, tc := range []struct{ input, unit string }{
+		{"", "sats"},
+		{"0", "sats"},
+		{"-1", "sats"},
+		{"abc", "sats"},
+		{"0.000000001", "BSV"},
+		{"-0.1", "BSV"},
+	} {
+		if _, err := parseAmount(tc.input, tc.unit); err == nil {
+			t.Fatalf("expected error for %#v", tc)
+		}
+	}
+}
+
+func TestParseRescanHeight(t *testing.T) {
+	if got, err := parseRescanHeight(""); err != nil || got != 0 {
+		t.Fatalf("blank height: got %d err=%v", got, err)
+	}
+	if got, err := parseRescanHeight("1713168"); err != nil || got != 1713168 {
+		t.Fatalf("height: got %d err=%v", got, err)
+	}
+	for _, input := range []string{"-1", "abc"} {
+		if _, err := parseRescanHeight(input); err == nil {
+			t.Fatalf("expected error for %q", input)
+		}
+	}
+}
+
+func TestBindDefaultRescanHeight(t *testing.T) {
+	hashEntry := widget.NewEntry()
+	heightEntry := widget.NewEntry()
+	heightEntry.SetText("1713168")
+	bindDefaultRescanHeight(hashEntry, heightEntry, app.NetworkTestnet)
+
+	hashEntry.SetText("0000000000000000000000000000000000000000000000000000000000000000")
+	if heightEntry.Text != "" {
+		t.Fatalf("custom hash should clear default height, got %q", heightEntry.Text)
+	}
+	hashEntry.SetText(app.DefaultRescanStartHash(app.NetworkTestnet))
+	if heightEntry.Text != "1713168" {
+		t.Fatalf("default hash should restore default height, got %q", heightEntry.Text)
+	}
+}
+
+func TestNetworkHelpers(t *testing.T) {
+	if got := networkFromLabel("Mainnet"); got != app.NetworkMainnet {
+		t.Fatalf("mainnet label: got %q", got)
+	}
+	if got := networkFromLabel("STN"); got != app.NetworkSTN {
+		t.Fatalf("stn label: got %q", got)
+	}
+	if got := networkFromLabel("Regtest"); got != app.NetworkRegtest {
+		t.Fatalf("regtest label: got %q", got)
+	}
+	if got := networkFromLabel("anything else"); got != app.NetworkTestnet {
+		t.Fatalf("default label: got %q", got)
+	}
+	if labels := networkLabels(); len(labels) != 4 || labels[0] != "Testnet" {
+		t.Fatalf("labels: got %#v", labels)
+	}
+}
+
+func TestWhatsOnChainTxURL(t *testing.T) {
+	tests := map[string]string{
+		app.NetworkMainnet: "https://whatsonchain.com/tx/abc",
+		app.NetworkTestnet: "https://test.whatsonchain.com/tx/abc",
+		app.NetworkSTN:     "https://stn.whatsonchain.com/tx/abc",
+	}
+	for network, want := range tests {
+		got := whatsOnChainTxURL(network, "abc")
+		if got == nil || got.String() != want {
+			t.Fatalf("url for %s: got %v want %s", network, got, want)
+		}
+	}
+	if got := whatsOnChainTxURL(app.NetworkRegtest, "abc"); got != nil {
+		t.Fatalf("regtest url: got %v want nil", got)
+	}
+}
+
+func TestDetailJSONHelpers(t *testing.T) {
+	now := time.Unix(10, 0).UTC()
+	utxo := store.UTXORecord{TxID: "tx", Vout: 1, Value: 42, ScriptHex: "51", Height: 5, SeenAt: now}
+	history := []store.TxRecord{{TxID: "tx", Vout: 1, Direction: "in", Amount: 42, SeenAt: now}}
+
+	utxoJSON := utxoDetailJSON(utxo, history)
+	if !json.Valid([]byte(utxoJSON)) || !strings.Contains(utxoJSON, `"value_sats": 42`) {
+		t.Fatalf("utxo detail json: %s", utxoJSON)
+	}
+
+	tx := store.TxRecord{TxID: "tx", Direction: "out", Amount: -42, SeenAt: now}
+	historyJSON := historyDetailJSON(tx, []store.UTXORecord{utxo})
+	if !json.Valid([]byte(historyJSON)) || !strings.Contains(historyJSON, `"amount_bsv": "-0.00000042"`) {
+		t.Fatalf("history detail json: %s", historyJSON)
+	}
+}
+
+func TestFormatSatsAndShort(t *testing.T) {
+	if got := formatSats(123456789); got != "1.23456789 BSV (123456789 sat)" {
+		t.Fatalf("format sats: got %q", got)
+	}
+	if got := formatSats(-42); got != "-0.00000042 BSV (-42 sat)" {
+		t.Fatalf("format negative sats: got %q", got)
+	}
+	if got := short("1234567890abcdefXYZ1234567890abc"); got != "12345678...67890abc" {
+		t.Fatalf("short: got %q", got)
+	}
+	if got := short("short"); got != "short" {
+		t.Fatalf("short passthrough: got %q", got)
+	}
+}

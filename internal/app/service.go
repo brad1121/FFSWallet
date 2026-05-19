@@ -11,8 +11,7 @@ import (
 	"sync"
 	"time"
 
-	bsv "github.com/brad1121/bitcoinsv-sdk-go/sdk"
-
+	"github.com/brad1121/FFSWallet/internal/bsvsdk"
 	"github.com/brad1121/FFSWallet/internal/store"
 )
 
@@ -32,6 +31,8 @@ const (
 	EventSend    EventType = "send"
 	EventError   EventType = "error"
 	EventPeer    EventType = "peer"
+	EventReject  EventType = "reject"
+	EventTraffic EventType = "traffic"
 )
 
 type Event struct {
@@ -66,24 +67,28 @@ type Snapshot struct {
 }
 
 type Service struct {
-	mu sync.RWMutex
+	mu     sync.RWMutex
+	sendMu sync.Mutex
 
 	baseDir    string
 	walletName string
 	path       string
 	passphrase string
 	payload    *store.Payload
-	node       *bsv.Node
-	wallet     *bsv.Wallet
+	runtime    *bsvsdk.Runtime
+	node       *bsvsdk.Node
+	wallet     *bsvsdk.Wallet
 
-	events     chan Event
-	statusStop chan struct{}
+	events        chan Event
+	statusStop    chan struct{}
+	p2pTraffic    bool
+	pendingSeeded bool
 }
 
 func NewService(baseDir string) *Service {
 	return &Service{
 		baseDir: baseDir,
-		events:  make(chan Event, 128),
+		events:  make(chan Event, 4096),
 	}
 }
 
@@ -95,6 +100,26 @@ func (s *Service) Close() {
 
 func (s *Service) Events() <-chan Event {
 	return s.events
+}
+
+func (s *Service) SetP2PTrafficEnabled(enabled bool) {
+	s.mu.Lock()
+	changed := s.p2pTraffic != enabled
+	s.p2pTraffic = enabled
+	if changed {
+		state := "disabled"
+		if enabled {
+			state = "enabled"
+		}
+		s.publishLocked(EventStatus, "p2p traffic logging "+state)
+	}
+	s.mu.Unlock()
+}
+
+func (s *Service) P2PTrafficEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.p2pTraffic
 }
 
 func (s *Service) WalletPath() string {
@@ -154,17 +179,19 @@ func (s *Service) CreateWallet(name, passphrase, network string) (string, error)
 	defer s.mu.Unlock()
 	s.stopRuntimeLocked(false)
 
-	node := newNode(payload)
-	wallet, mnemonic, err := node.CreateWallet(name)
+	runtime, mnemonic, err := bsvsdk.CreateWallet(context.Background(), s.runtimeConfig(payload))
 	if err != nil {
-		return "", fmt.Errorf("create sdk wallet: %w", err)
+		return "", err
 	}
+	node := runtime.Node
+	wallet := runtime.Wallet
 	payload.Mnemonic = mnemonic
 
 	s.walletName = name
 	s.path = path
 	s.passphrase = passphrase
 	s.payload = payload
+	s.runtime = runtime
 	s.node = node
 	s.wallet = wallet
 
@@ -173,6 +200,10 @@ func (s *Service) CreateWallet(name, passphrase, network string) (string, error)
 		return "", err
 	}
 	if err := s.saveLocked(); err != nil {
+		s.stopRuntimeLocked(true)
+		return "", err
+	}
+	if err := runtime.SaveAddressSnapshot(); err != nil {
 		s.stopRuntimeLocked(true)
 		return "", err
 	}
@@ -214,15 +245,17 @@ func (s *Service) createWalletFromMnemonic(name, mnemonic, passphrase, network, 
 	defer s.mu.Unlock()
 	s.stopRuntimeLocked(false)
 
-	node := newNode(payload)
-	wallet, err := node.RestoreWallet(name, mnemonic, "")
+	runtime, err := bsvsdk.RestoreWallet(context.Background(), s.runtimeConfig(payload))
 	if err != nil {
-		return fmt.Errorf("restore sdk wallet: %w", err)
+		return err
 	}
+	node := runtime.Node
+	wallet := runtime.Wallet
 	s.walletName = name
 	s.path = path
 	s.passphrase = passphrase
 	s.payload = payload
+	s.runtime = runtime
 	s.node = node
 	s.wallet = wallet
 
@@ -231,6 +264,10 @@ func (s *Service) createWalletFromMnemonic(name, mnemonic, passphrase, network, 
 		return err
 	}
 	if err := s.saveLocked(); err != nil {
+		s.stopRuntimeLocked(true)
+		return err
+	}
+	if err := runtime.SaveAddressSnapshot(); err != nil {
 		s.stopRuntimeLocked(true)
 		return err
 	}
@@ -338,142 +375,13 @@ func (s *Service) NewReceiveAddress() (string, error) {
 	if err := s.saveLocked(); err != nil {
 		return "", err
 	}
+	if s.runtime != nil {
+		if err := s.runtime.SaveAddressSnapshot(); err != nil {
+			return "", err
+		}
+	}
 	s.publishLocked(EventWallet, "receive address generated")
 	return addr, nil
-}
-
-func (s *Service) Send(to string, satoshis int64) (string, error) {
-	to = strings.TrimSpace(to)
-	if to == "" {
-		return "", errors.New("destination address required")
-	}
-	if satoshis <= 0 {
-		return "", errors.New("amount must be positive")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.wallet == nil || s.node == nil {
-		return "", errors.New("wallet locked")
-	}
-	if err := s.wallet.CanCover(satoshis, s.payload.FeePerByte, 1); err != nil {
-		return "", err
-	}
-	out, err := s.node.P2PKHOutput(to, satoshis)
-	if err != nil {
-		return "", err
-	}
-
-	changeIndex := s.payload.NextChange
-	detail, err := s.wallet.SpendToOutputsDetailed([]bsv.OutputSpec{out})
-	if err != nil {
-		s.resetRuntimeFromPayloadLocked()
-		return "", err
-	}
-	if detail.ChangeUTXO != nil {
-		addr, _ := s.node.DecodeOutputAddress(detail.ChangeUTXO.Script)
-		s.addAddressRecordLocked(store.AddressRecord{
-			Branch:    1,
-			Index:     changeIndex,
-			Address:   addr,
-			ScriptHex: hex.EncodeToString(detail.ChangeUTXO.Script),
-		})
-	}
-	s.refreshUTXOsLocked()
-	s.appendHistoryLocked(store.TxRecord{
-		TxID:      detail.TxID,
-		Direction: "out",
-		Address:   to,
-		Amount:    -satoshis,
-		Height:    -1,
-		Status:    "broadcast",
-		SeenAt:    time.Now().UTC(),
-	})
-	if err := s.saveLocked(); err != nil {
-		return "", err
-	}
-	s.publishLocked(EventSend, fmt.Sprintf("sent %d sat to %s", satoshis, to))
-	return detail.TxID, nil
-}
-
-func (s *Service) SendAll(to string) (string, error) {
-	to = strings.TrimSpace(to)
-	if to == "" {
-		return "", errors.New("destination address required")
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.wallet == nil {
-		return "", errors.New("wallet locked")
-	}
-	before := s.wallet.Balance()
-	txid, err := s.wallet.SendAll(to)
-	if err != nil {
-		s.resetRuntimeFromPayloadLocked()
-		return "", err
-	}
-	s.refreshUTXOsLocked()
-	s.appendHistoryLocked(store.TxRecord{
-		TxID:      txid,
-		Direction: "out",
-		Address:   to,
-		Amount:    -before,
-		Height:    -1,
-		Status:    "broadcast",
-		SeenAt:    time.Now().UTC(),
-		Note:      "send all",
-	})
-	if err := s.saveLocked(); err != nil {
-		return "", err
-	}
-	s.publishLocked(EventSend, fmt.Sprintf("swept %d sat to %s", before, to))
-	return txid, nil
-}
-
-func (s *Service) RescanFromBlockHash(startHash string) (string, error) {
-	hash, err := parseDisplayBlockHash(startHash)
-	if err != nil {
-		return "", err
-	}
-
-	s.mu.RLock()
-	node := s.node
-	wallet := s.wallet
-	s.mu.RUnlock()
-	if node == nil || wallet == nil {
-		return "", errors.New("wallet locked")
-	}
-
-	s.publish(EventStatus, "waiting for peer before rescan")
-	deadline := time.Now().Add(time.Minute)
-	for node.PeerCount() == 0 {
-		if time.Now().After(deadline) {
-			return "", errors.New("rescan: no connected peers")
-		}
-		time.Sleep(time.Second)
-	}
-
-	s.publish(EventStatus, "rescan started")
-	stats, err := wallet.RescanFromHash(context.Background(), hash, bsv.RescanOptions{MaxBlocks: 1_000_000})
-	if err != nil {
-		s.publish(EventError, err.Error())
-		return "", err
-	}
-
-	s.mu.Lock()
-	if s.wallet == wallet && s.payload != nil {
-		s.refreshUTXOsLocked()
-		err = s.saveLocked()
-	}
-	s.mu.Unlock()
-	if err != nil {
-		return "", err
-	}
-
-	msg := fmt.Sprintf("rescan complete: %d blocks, %d transactions", stats.BlocksFetched, stats.TxsReplayed)
-	s.publish(EventStatus, msg)
-	return msg, nil
 }
 
 func (s *Service) Snapshot() Snapshot {
@@ -506,17 +414,23 @@ func (s *Service) Snapshot() Snapshot {
 
 func (s *Service) startExistingRuntimeLocked(payload *store.Payload, passphrase string) error {
 	payload.EnsureDefaults()
-	node := newNode(payload)
-	wallet, err := node.RestoreWallet(payload.WalletName, payload.Mnemonic, "")
+	runtime, err := bsvsdk.RestoreWallet(context.Background(), s.runtimeConfig(payload))
 	if err != nil {
-		return fmt.Errorf("restore sdk wallet: %w", err)
+		return err
 	}
+	node := runtime.Node
+	wallet := runtime.Wallet
 
 	s.passphrase = passphrase
 	s.payload = payload
+	s.runtime = runtime
 	s.node = node
 	s.wallet = wallet
 
+	snapshotLoaded, err := runtime.LoadAddressSnapshot()
+	if err != nil {
+		return fmt.Errorf("load address snapshot: %w", err)
+	}
 	sort.Slice(s.payload.Addresses, func(i, j int) bool {
 		if s.payload.Addresses[i].Branch == s.payload.Addresses[j].Branch {
 			return s.payload.Addresses[i].Index < s.payload.Addresses[j].Index
@@ -527,6 +441,9 @@ func (s *Service) startExistingRuntimeLocked(payload *store.Payload, passphrase 
 		if rec.Branch > 1 {
 			return fmt.Errorf("invalid address branch %d", rec.Branch)
 		}
+		if snapshotLoaded && rec.Index < wallet.NextIndex(rec.Branch) {
+			continue
+		}
 		if _, err := wallet.DeriveAt(rec.Branch, rec.Index); err != nil {
 			return fmt.Errorf("derive %d/%d: %w", rec.Branch, rec.Index, err)
 		}
@@ -536,14 +453,25 @@ func (s *Service) startExistingRuntimeLocked(payload *store.Payload, passphrase 
 			return err
 		}
 	}
-	for _, u := range s.payload.UTXOs {
-		script, err := hex.DecodeString(u.ScriptHex)
-		if err != nil {
-			return fmt.Errorf("decode utxo script %s:%d: %w", u.TxID, u.Vout, err)
+	loaded, err := runtime.LoadStore(context.Background())
+	if err != nil {
+		return err
+	}
+	if loaded == 0 && len(s.payload.UTXOs) > 0 {
+		for _, u := range s.payload.UTXOs {
+			script, err := hex.DecodeString(u.ScriptHex)
+			if err != nil {
+				return fmt.Errorf("decode legacy utxo script %s:%d: %w", u.TxID, u.Vout, err)
+			}
+			if err := wallet.ForceImportUTXO(u.TxID, u.Vout, u.Value, script, u.Height); err != nil {
+				return fmt.Errorf("import legacy utxo %s:%d: %w", u.TxID, u.Vout, err)
+			}
 		}
-		if err := wallet.ForceImportUTXO(u.TxID, u.Vout, u.Value, script, u.Height); err != nil {
-			return fmt.Errorf("import utxo %s:%d: %w", u.TxID, u.Vout, err)
-		}
+		s.publishLocked(EventStatus, "loaded legacy JSON UTXO cache; run rebuild rescan to seed SDK store")
+	}
+	s.refreshUTXOsLocked()
+	if err := runtime.SaveAddressSnapshot(); err != nil {
+		return err
 	}
 	s.wireRuntimeLocked(node, wallet)
 	if err := s.connectLocked(); err != nil {
@@ -590,12 +518,15 @@ func (s *Service) refreshUTXOsLocked() {
 	if s.wallet == nil {
 		return
 	}
+	s.applyUTXOSnapshotLocked(s.wallet.UTXOs())
+}
+
+func (s *Service) applyUTXOSnapshotLocked(src []bsvsdk.UTXO) {
 	seen := make(map[string]time.Time, len(s.payload.UTXOs))
 	for _, u := range s.payload.UTXOs {
 		seen[utxoKey(u.TxID, u.Vout)] = u.SeenAt
 	}
 	now := time.Now().UTC()
-	src := s.wallet.UTXOs()
 	next := make([]store.UTXORecord, 0, len(src))
 	for _, u := range src {
 		at := seen[utxoKey(u.TxID, u.Vout)]
@@ -636,7 +567,7 @@ func (s *Service) appendHistoryLocked(rec store.TxRecord) {
 	}
 }
 
-func (s *Service) wireRuntimeLocked(node *bsv.Node, wallet *bsv.Wallet) {
+func (s *Service) wireRuntimeLocked(node *bsvsdk.Node, wallet *bsvsdk.Wallet) {
 	node.OnPeerConnect(func(addr string) {
 		s.mu.Lock()
 		active := s.node == node
@@ -644,6 +575,9 @@ func (s *Service) wireRuntimeLocked(node *bsv.Node, wallet *bsv.Wallet) {
 			s.publishLocked(EventPeer, "peer connected: "+addr)
 		}
 		s.mu.Unlock()
+		if active {
+			s.seedPendingFromHistory(node)
+		}
 	})
 	node.OnPeerDisconnect(func(addr string, reason error) {
 		s.mu.Lock()
@@ -657,33 +591,72 @@ func (s *Service) wireRuntimeLocked(node *bsv.Node, wallet *bsv.Wallet) {
 		}
 		s.mu.Unlock()
 	})
-	wallet.OnPayment(func(p bsv.Payment) {
+	node.OnReject(func(reject bsvsdk.Reject) {
+		s.mu.Lock()
+		active := s.node == node
+		if active {
+			s.publishLocked(EventReject, formatReject(reject))
+		}
+		s.mu.Unlock()
+	})
+	node.OnP2PTraffic(func(traffic bsvsdk.P2PTraffic) {
+		s.mu.RLock()
+		active := s.node == node && s.p2pTraffic
+		s.mu.RUnlock()
+		if !active {
+			return
+		}
+		s.publish(EventTraffic, formatP2PTraffic(traffic))
+	})
+	wallet.OnWalletTx(func(tx *bsvsdk.Transaction, owned []bsvsdk.OwnedOutput, spent []bsvsdk.SpentOutPoint) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.wallet != wallet || s.payload == nil {
 			return
 		}
-		for _, existing := range s.payload.UTXOs {
-			if existing.TxID == p.TxID && existing.Vout == p.Vout {
-				return
+		txID := tx.TxID()
+		changed := false
+		if len(spent) > 0 {
+			if s.markOutgoingRelayedLocked(txID) {
+				changed = true
 			}
-		}
-		s.refreshUTXOsLocked()
-		s.appendHistoryLocked(store.TxRecord{
-			TxID:      p.TxID,
-			Vout:      p.Vout,
-			Direction: "in",
-			Address:   p.Address,
-			Amount:    p.Amount,
-			Height:    -1,
-			Status:    "seen",
-			SeenAt:    time.Now().UTC(),
-		})
-		if err := s.saveLocked(); err != nil {
-			s.publishLocked(EventError, err.Error())
+			s.refreshUTXOsLocked()
+			if err := s.saveLocked(); err != nil {
+				s.publishLocked(EventError, err.Error())
+			}
 			return
 		}
-		s.publishLocked(EventPayment, fmt.Sprintf("received %d sat at %s (tx %s)", p.Amount, p.Address, shortTxID(p.TxID)))
+		for _, o := range owned {
+			alreadyKnown := false
+			for _, existing := range s.payload.UTXOs {
+				if existing.TxID == txID && existing.Vout == o.Vout {
+					alreadyKnown = true
+					break
+				}
+			}
+			if alreadyKnown {
+				continue
+			}
+			s.appendHistoryLocked(store.TxRecord{
+				TxID:      txID,
+				Vout:      o.Vout,
+				Direction: "in",
+				Address:   o.Address,
+				Amount:    o.Value,
+				Height:    -1,
+				Status:    "seen",
+				SeenAt:    time.Now().UTC(),
+			})
+			s.publishLocked(EventPayment, fmt.Sprintf("received tx=%s vout=%d amount=%d sat at=%s", txID, o.Vout, o.Value, o.Address))
+			changed = true
+		}
+		if !changed {
+			return
+		}
+		s.refreshUTXOsLocked()
+		if err := s.saveLocked(); err != nil {
+			s.publishLocked(EventError, err.Error())
+		}
 	})
 }
 
@@ -724,11 +697,15 @@ func (s *Service) stopRuntimeLocked(clearSecrets bool) {
 		close(s.statusStop)
 		s.statusStop = nil
 	}
-	if s.node != nil {
+	if s.runtime != nil {
+		s.runtime.Close()
+	} else if s.node != nil {
 		s.node.Disconnect()
 	}
+	s.runtime = nil
 	s.node = nil
 	s.wallet = nil
+	s.pendingSeeded = false
 	if clearSecrets {
 		s.passphrase = ""
 		s.payload = nil
@@ -787,28 +764,15 @@ func (s *Service) publishLocked(kind EventType, message string) {
 	}
 }
 
-func newNode(payload *store.Payload) *bsv.Node {
-	cfg := bsv.DefaultConfig()
-	cfg.MaxPeers = payload.MaxPeers
-	if cfg.MaxPeers < 16 {
-		cfg.MaxPeers = 16
-	}
-	cfg.FeePerByte = payload.FeePerByte
-	cfg.UserAgent = "/ffswallet:0.1/"
-	cfg.SkipBlockDownload = true
-	return bsv.New(networkType(payload.Network), cfg)
-}
-
-func networkType(network string) bsv.NetworkType {
-	switch NormalizeNetwork(network) {
-	case NetworkMainnet:
-		return bsv.Mainnet
-	case NetworkSTN:
-		return bsv.STN
-	case NetworkRegtest:
-		return bsv.Regtest
-	default:
-		return bsv.Testnet
+func (s *Service) runtimeConfig(payload *store.Payload) bsvsdk.RuntimeConfig {
+	return bsvsdk.RuntimeConfig{
+		WalletName:   payload.WalletName,
+		Mnemonic:     payload.Mnemonic,
+		Network:      payload.Network,
+		FeePerByte:   payload.FeePerByte,
+		MaxPeers:     payload.MaxPeers,
+		StorePath:    store.WalletStorePath(s.baseDir, payload.WalletName),
+		SnapshotPath: store.WalletSnapshotPath(s.baseDir, payload.WalletName),
 	}
 }
 
@@ -838,46 +802,8 @@ func NetworkLabel(network string) string {
 	}
 }
 
-func DefaultRescanStartHash(network string) string {
-	switch NormalizeNetwork(network) {
-	case NetworkMainnet:
-		return "0000000000000000042e91bfd7e7c7ca9eebeb7d6996e4bf010ad8a5b3283efc"
-	case NetworkTestnet:
-		return "00000000046e321cb1aa6941a7cdc2a97ca65d0caa19e7302df68d1045bd5435"
-	default:
-		return ""
-	}
-}
-
-func DefaultRescanStartLabel(network string) string {
-	switch NormalizeNetwork(network) {
-	case NetworkMainnet:
-		return "Chronicle checkpoint, mainnet height 943816"
-	case NetworkTestnet:
-		return "Chronicle checkpoint, testnet height 1713168"
-	default:
-		return "No default checkpoint for this network"
-	}
-}
-
 func normalizeMnemonic(input string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(input)), " ")
-}
-
-func parseDisplayBlockHash(input string) ([32]byte, error) {
-	var hash [32]byte
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return hash, errors.New("start block hash required")
-	}
-	raw, err := hex.DecodeString(input)
-	if err != nil || len(raw) != 32 {
-		return hash, errors.New("start block hash must be 64 hex characters")
-	}
-	for i := 0; i < 32; i++ {
-		hash[i] = raw[31-i]
-	}
-	return hash, nil
 }
 
 func shortTxID(txid string) string {
@@ -908,6 +834,30 @@ func currentReceiveAddress(records []store.AddressRecord) string {
 
 func utxoKey(txid string, vout uint32) string {
 	return fmt.Sprintf("%s:%d", txid, vout)
+}
+
+func formatReject(reject bsvsdk.Reject) string {
+	reason := strings.TrimSpace(reject.Reason)
+	if reason == "" {
+		reason = "no reason"
+	}
+	target := ""
+	if reject.Hash != "" {
+		label := "hash"
+		if reject.Command == "tx" {
+			label = "tx"
+		}
+		target = fmt.Sprintf(" %s=%s", label, reject.Hash)
+	}
+	return fmt.Sprintf("peer reject peer=%s command=%s%s code=0x%02x/%s reason=%q", reject.Peer, reject.Command, target, reject.Code, reject.CodeName, reason)
+}
+
+func formatP2PTraffic(traffic bsvsdk.P2PTraffic) string {
+	msg := fmt.Sprintf("p2p %s peer=%s cmd=%s bytes=%d", traffic.Direction, traffic.Peer, traffic.Command, traffic.PayloadBytes)
+	if strings.TrimSpace(traffic.Summary) != "" {
+		msg += " " + traffic.Summary
+	}
+	return msg
 }
 
 func clonePayload(p *store.Payload) *store.Payload {

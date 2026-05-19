@@ -64,6 +64,14 @@ func WalletPath(baseDir, name string) string {
 	return filepath.Join(WalletsDir(baseDir), name+".json")
 }
 
+func WalletStorePath(baseDir, name string) string {
+	return filepath.Join(WalletsDir(baseDir), name+".sqlite")
+}
+
+func WalletSnapshotPath(baseDir, name string) string {
+	return filepath.Join(WalletsDir(baseDir), name+".addresses.gob.gz")
+}
+
 func NormalizeWalletName(name string) (string, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
