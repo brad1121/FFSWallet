@@ -147,3 +147,20 @@ func TestFormatSatsAndShort(t *testing.T) {
 		t.Fatalf("short passthrough: got %q", got)
 	}
 }
+
+func TestFormatHeight(t *testing.T) {
+	cases := []struct {
+		chain, peer int32
+		want        string
+	}{
+		{-1, -1, "Height: —"},
+		{850000, 850000, "Height: 850000"},
+		{850000, 850002, "Height: 850000 / 850002 (syncing)"},
+		{850000, -1, "Height: 850000"},
+	}
+	for _, c := range cases {
+		if got := formatHeight(c.chain, c.peer); got != c.want {
+			t.Fatalf("formatHeight(%d,%d): got %q want %q", c.chain, c.peer, got, c.want)
+		}
+	}
+}

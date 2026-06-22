@@ -793,7 +793,7 @@ func (u *UI) refresh() {
 	u.balanceLabel.SetText("Balance: " + formatSats(snap.BalanceSats))
 	u.networkLabel.SetText("Network: " + walletapp.NetworkLabel(snap.Network))
 	u.peerLabel.SetText(fmt.Sprintf("Peers: %d", snap.Status.PeerCount))
-	u.heightLabel.SetText(fmt.Sprintf("Height: %d", snap.Status.BestPeerHeight))
+	u.heightLabel.SetText(formatHeight(snap.Status.ChainHeight, snap.Status.BestPeerHeight))
 	addr := snap.ReceiveAddress
 	if addr == "" {
 		addr = "-"
@@ -1227,6 +1227,20 @@ func formatSats(sats int64) string {
 		sats = -sats
 	}
 	return fmt.Sprintf("%s%d.%08d BSV (%s%d sat)", sign, sats/100000000, sats%100000000, sign, sats)
+}
+
+// formatHeight renders the wallet's followed header tip alongside the best
+// height advertised by peers. When peers are ahead the wallet is still
+// catching up, so show both as "chain / peer (syncing)"; otherwise show the
+// single synced height.
+func formatHeight(chain, peer int32) string {
+	if chain < 0 && peer < 0 {
+		return "Height: —"
+	}
+	if peer > chain {
+		return fmt.Sprintf("Height: %d / %d (syncing)", chain, peer)
+	}
+	return fmt.Sprintf("Height: %d", chain)
 }
 
 func short(txid string) string {
