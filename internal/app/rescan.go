@@ -67,6 +67,13 @@ func (s *Service) resolveRescanTarget(startHash string, startHeight int32) (Resc
 }
 
 func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, error) {
+	// One scan at a time: an automatic catch-up and a manual rescan both walk
+	// blocks into the same wallet, and two walks would fight over the cursor.
+	if !s.scanMu.TryLock() {
+		return "", errors.New("a rescan is already running")
+	}
+	defer s.scanMu.Unlock()
+
 	var original []store.UTXORecord
 	if rebuild {
 		s.mu.Lock()
@@ -80,6 +87,12 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 			return "", err
 		}
 		s.payload.UTXOs = nil
+		// The wipe threw away everything previously scanned, so the cursor no
+		// longer describes the wallet. Rewind it to this rescan's start: if
+		// the rebuild dies partway, catch-up resumes from there rather than
+		// from a height whose blocks are no longer in the wallet.
+		s.payload.SyncedHash = target.DisplayHash
+		s.payload.SyncedHeight = target.StartHeight
 		if err := s.saveLocked(); err != nil {
 			s.restoreUTXOsLocked(original)
 			s.mu.Unlock()
@@ -124,8 +137,8 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 		MaxConsecutiveBlockErrors: 5,
 		StartHeight:               target.StartHeight,
 		CheckpointEvery:           rescanCheckpointEvery,
-		Checkpoint: func(snapshot []bsvsdk.UTXO, _ [32]byte) {
-			s.saveRescanCheckpoint(wallet, snapshot)
+		Checkpoint: func(snapshot []bsvsdk.UTXO, lastBlock [32]byte) {
+			s.saveRescanCheckpoint(wallet, snapshot, node, lastBlock)
 		},
 		GCEvery: rescanGCEvery,
 		Progress: func(progress bsvsdk.RescanProgress) {
@@ -160,6 +173,7 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 	if s.wallet == wallet && s.payload != nil {
 		active = true
 		s.refreshUTXOsLocked()
+		s.advanceSyncCursorLocked(displayBlockHash(stats.StoppedAt), stats.StoppedHeight)
 		err = s.saveLocked()
 	}
 	s.mu.Unlock()
@@ -181,16 +195,82 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 	return msg, nil
 }
 
-func (s *Service) saveRescanCheckpoint(activeWallet *bsvsdk.Wallet, snapshot []bsvsdk.UTXO) {
+func (s *Service) saveRescanCheckpoint(activeWallet *bsvsdk.Wallet, snapshot []bsvsdk.UTXO, node *bsvsdk.Node, lastBlock [32]byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.wallet != activeWallet || s.payload == nil {
 		return
 	}
 	s.applyUTXOSnapshotLocked(snapshot)
+	// The SDK retains the header of every block a rescan replays, so the
+	// checkpointed hash resolves back to a height without a chain lookup.
+	if hash := displayBlockHash(lastBlock); hash != "" && node != nil {
+		if hdr, ok := node.HeaderByHash(hash); ok {
+			s.advanceSyncCursorLocked(hash, hdr.Height)
+		}
+	}
 	if err := s.saveLocked(); err != nil {
 		s.publishLocked(EventError, "rescan checkpoint save: "+err.Error())
 	}
+}
+
+// advanceSyncCursorLocked moves the wallet's scanned-to marker forward. It
+// only ever moves forward: a rescan started from a point behind the cursor
+// re-covers ground already scanned, and letting it drag the marker back would
+// make the next catch-up redo that same stretch again.
+func (s *Service) advanceSyncCursorLocked(hash string, height int32) {
+	if s.payload == nil || hash == "" || height <= 0 {
+		return
+	}
+	if height <= s.payload.SyncedHeight {
+		return
+	}
+	s.payload.SyncedHash = hash
+	s.payload.SyncedHeight = height
+}
+
+// CatchUp scans from the wallet's saved cursor to the chain tip. It is what
+// makes a balance correct after the wallet has been closed: while it runs the
+// node only learns of payments relayed through the mempool, so anything mined
+// in the meantime is invisible until those blocks are replayed. Returns an
+// empty string when the wallet has no cursor yet and nothing was scanned.
+func (s *Service) CatchUp() (string, error) {
+	s.mu.RLock()
+	var hash string
+	var height int32
+	if s.payload != nil {
+		hash = s.payload.SyncedHash
+		height = s.payload.SyncedHeight
+	}
+	locked := s.wallet == nil
+	s.mu.RUnlock()
+
+	if locked {
+		return "", errors.New("wallet locked")
+	}
+	if hash == "" || height <= 0 {
+		return "", nil
+	}
+	target, err := ParseRescanTarget(hash, height)
+	if err != nil {
+		return "", fmt.Errorf("catch-up cursor %s: %w", shortTxID(hash), err)
+	}
+	s.publish(EventStatus, fmt.Sprintf("catching up from h=%d block=%s", height, shortTxID(hash)))
+	return s.rescanFromHash(target, false)
+}
+
+// displayBlockHash renders an internal-order block hash as the display-order
+// hex the wallet file and the rescan dialog both use. Inverse of
+// parseDisplayBlockHash.
+func displayBlockHash(hash [32]byte) string {
+	if hash == ([32]byte{}) {
+		return ""
+	}
+	var out [32]byte
+	for i := 0; i < 32; i++ {
+		out[i] = hash[31-i]
+	}
+	return hex.EncodeToString(out[:])
 }
 
 func (s *Service) restoreUTXOsAfterRebuild(original []store.UTXORecord, activeWallet *bsvsdk.Wallet) {

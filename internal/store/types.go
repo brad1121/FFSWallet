@@ -35,8 +35,15 @@ type Payload struct {
 	Addresses    []AddressRecord `json:"addresses"`
 	UTXOs        []UTXORecord    `json:"utxos"`
 	History      []TxRecord      `json:"history"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
+	// SyncedHash / SyncedHeight name the last block this wallet has scanned
+	// to. A rescan advances them; the next unlock resumes from there instead
+	// of replaying the chain from the network checkpoint. Empty on wallets
+	// created before the cursor existed — those still need one manual rescan
+	// to establish it.
+	SyncedHash   string    `json:"synced_hash,omitempty"`
+	SyncedHeight int32     `json:"synced_height,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type AddressRecord struct {

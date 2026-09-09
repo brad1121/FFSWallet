@@ -24,6 +24,8 @@ type OwnedOutput = bsv.OwnedOutput
 type SpentOutPoint = bsv.SpentOutPoint
 type RescanOptions = bsv.RescanOptions
 type RescanProgress = bsv.RescanProgress
+type RescanStats = bsv.RescanStats
+type BlockHeaderInfo = bsv.BlockHeaderInfo
 
 type RuntimeConfig struct {
 	WalletName   string

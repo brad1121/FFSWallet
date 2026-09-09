@@ -4,6 +4,17 @@ Desktop Bitcoin SV wallet written in Go.
 
 Seed-word imports can optionally rescan from a user-provided block hash. Default start point is the Chronicle checkpoint for supported networks.
 
+## Sync
+
+The node follows the mempool, not the block chain, so a payment mined while the
+wallet was closed is not in the balance until its block is replayed. Each
+completed rescan records the block it reached, and unlocking the wallet catches
+up from there in the background. The status bar shows how far the wallet has
+been scanned alongside the peers' best height.
+
+Wallets created before the cursor existed have no start point: run one rescan to
+establish it, after which catch-up is automatic.
+
 ## Stack
 
 - UI: Fyne, pure Go desktop widgets.

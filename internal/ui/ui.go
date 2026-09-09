@@ -793,7 +793,7 @@ func (u *UI) refresh() {
 	u.balanceLabel.SetText("Balance: " + formatSats(snap.BalanceSats))
 	u.networkLabel.SetText("Network: " + walletapp.NetworkLabel(snap.Network))
 	u.peerLabel.SetText(fmt.Sprintf("Peers: %d", snap.Status.PeerCount))
-	u.heightLabel.SetText(formatHeight(snap.Status.ChainHeight, snap.Status.BestPeerHeight))
+	u.heightLabel.SetText(formatHeight(snap.Status.ChainHeight, snap.Status.BestPeerHeight, snap.SyncedHeight))
 	addr := snap.ReceiveAddress
 	if addr == "" {
 		addr = "-"
@@ -1233,14 +1233,24 @@ func formatSats(sats int64) string {
 // height advertised by peers. When peers are ahead the wallet is still
 // catching up, so show both as "chain / peer (syncing)"; otherwise show the
 // single synced height.
-func formatHeight(chain, peer int32) string {
-	if chain < 0 && peer < 0 {
-		return "Height: —"
+func formatHeight(chain, peer, synced int32) string {
+	base := "Height: —"
+	switch {
+	case chain < 0 && peer < 0:
+	case peer > chain:
+		base = fmt.Sprintf("Height: %d / %d (syncing)", chain, peer)
+	default:
+		base = fmt.Sprintf("Height: %d", chain)
 	}
-	if peer > chain {
-		return fmt.Sprintf("Height: %d / %d (syncing)", chain, peer)
+	if synced <= 0 {
+		// No cursor yet: the wallet has never completed a scan, so it only
+		// knows about payments relayed while it was open.
+		return base + " · not scanned"
 	}
-	return fmt.Sprintf("Height: %d", chain)
+	if peer > synced {
+		return base + fmt.Sprintf(" · scanned to %d (%d behind)", synced, peer-synced)
+	}
+	return base + fmt.Sprintf(" · scanned to %d", synced)
 }
 
 func short(txid string) string {

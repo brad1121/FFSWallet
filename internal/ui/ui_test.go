@@ -150,17 +150,21 @@ func TestFormatSatsAndShort(t *testing.T) {
 
 func TestFormatHeight(t *testing.T) {
 	cases := []struct {
-		chain, peer int32
-		want        string
+		chain, peer, synced int32
+		want                string
 	}{
-		{-1, -1, "Height: —"},
-		{850000, 850000, "Height: 850000"},
-		{850000, 850002, "Height: 850000 / 850002 (syncing)"},
-		{850000, -1, "Height: 850000"},
+		{-1, -1, 0, "Height: — · not scanned"},
+		{850000, 850000, 0, "Height: 850000 · not scanned"},
+		{850000, 850000, 850000, "Height: 850000 · scanned to 850000"},
+		{850000, 850002, 850000, "Height: 850000 / 850002 (syncing) · scanned to 850000 (2 behind)"},
+		{850000, -1, 850000, "Height: 850000 · scanned to 850000"},
+		// A wallet reopened after a week: the node knows the tip from headers
+		// long before the scan has replayed the blocks up to it.
+		{849000, 850000, 849500, "Height: 849000 / 850000 (syncing) · scanned to 849500 (500 behind)"},
 	}
 	for _, c := range cases {
-		if got := formatHeight(c.chain, c.peer); got != c.want {
-			t.Fatalf("formatHeight(%d,%d): got %q want %q", c.chain, c.peer, got, c.want)
+		if got := formatHeight(c.chain, c.peer, c.synced); got != c.want {
+			t.Fatalf("formatHeight(%d,%d,%d): got %q want %q", c.chain, c.peer, c.synced, got, c.want)
 		}
 	}
 }

@@ -63,12 +63,14 @@ type Snapshot struct {
 	Addresses      []store.AddressRecord
 	UTXOs          []store.UTXORecord
 	History        []store.TxRecord
+	SyncedHeight   int32
 	Status         NodeStatus
 }
 
 type Service struct {
 	mu     sync.RWMutex
 	sendMu sync.Mutex
+	scanMu sync.Mutex
 
 	baseDir    string
 	walletName string
@@ -300,7 +302,25 @@ func (s *Service) Unlock(passphrase string) error {
 		return err
 	}
 	s.publishLocked(EventWallet, "wallet unlocked")
+	// Blocks mined while this wallet was closed were never seen: the node only
+	// follows the mempool, so those payments are missing from the balance
+	// until their blocks are replayed. Catch up in the background so the
+	// window stays usable while it runs.
+	go s.runCatchUp()
 	return nil
+}
+
+// runCatchUp drives CatchUp and reports through the event log; the rescan
+// itself publishes its own progress and completion.
+func (s *Service) runCatchUp() {
+	msg, err := s.CatchUp()
+	if err != nil {
+		s.publish(EventError, "catch-up: "+err.Error())
+		return
+	}
+	if msg == "" {
+		s.publish(EventStatus, "no sync cursor yet; run a rescan to establish one")
+	}
 }
 
 func (s *Service) Lock() {
@@ -402,6 +422,7 @@ func (s *Service) Snapshot() Snapshot {
 	snap.Addresses = append([]store.AddressRecord(nil), s.payload.Addresses...)
 	snap.UTXOs = append([]store.UTXORecord(nil), s.payload.UTXOs...)
 	snap.History = append([]store.TxRecord(nil), s.payload.History...)
+	snap.SyncedHeight = s.payload.SyncedHeight
 	if s.wallet != nil {
 		snap.BalanceSats = s.wallet.Balance()
 	} else {
