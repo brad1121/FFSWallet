@@ -809,7 +809,7 @@ func (u *UI) refresh() {
 	u.balanceLabel.SetText("Balance: " + formatSats(snap.BalanceSats))
 	u.networkLabel.SetText("Network: " + walletapp.NetworkLabel(snap.Network))
 	u.peerLabel.SetText(fmt.Sprintf("Peers: %d", snap.Status.PeerCount))
-	u.heightLabel.SetText(formatHeight(snap.Status.ChainHeight, snap.Status.BestPeerHeight, snap.SyncedHeight, snap.ScanRate))
+	u.heightLabel.SetText(formatHeight(snap.Status.ChainHeight, snap.Status.BestPeerHeight, snap.SyncedHeight, snap.ScanRate, snap.ScanPhase))
 	if u.stopScan != nil {
 		if snap.Scanning {
 			u.stopScan.Enable()
@@ -1256,7 +1256,7 @@ func formatSats(sats int64) string {
 // height advertised by peers. When peers are ahead the wallet is still
 // catching up, so show both as "chain / peer (syncing)"; otherwise show the
 // single synced height.
-func formatHeight(chain, peer, synced int32, scanRate float64) string {
+func formatHeight(chain, peer, synced int32, scanRate float64, scanPhase string) string {
 	base := "Height: —"
 	switch {
 	case chain < 0 && peer < 0:
@@ -1272,9 +1272,19 @@ func formatHeight(chain, peer, synced int32, scanRate float64) string {
 	}
 	if peer > synced {
 		behind := peer - synced
-		return base + fmt.Sprintf(" · scanned to %d (%d behind%s)", synced, behind, formatScanRate(scanRate, behind))
+		return base + fmt.Sprintf(" · scanned to %d (%d behind%s)", synced, behind, formatScanState(scanRate, behind, scanPhase))
 	}
-	return base + fmt.Sprintf(" · scanned to %d%s", synced, formatScanRate(scanRate, 0))
+	return base + fmt.Sprintf(" · scanned to %d%s", synced, formatScanState(scanRate, 0, scanPhase))
+}
+
+// formatScanState says what the scan is doing. A phase wins over the rate: a
+// scan sitting in "waiting for a block" is not moving, and showing the last
+// measured speed there would read as progress that is not happening.
+func formatScanState(rate float64, behind int32, phase string) string {
+	if phase != "" {
+		return ", " + phase
+	}
+	return formatScanRate(rate, behind)
 }
 
 // formatScanRate renders the live scan speed, and how long the remaining

@@ -340,3 +340,31 @@ func TestNoteScanProgressMeasuresOverWindow(t *testing.T) {
 		t.Fatalf("reset left state behind: rate=%v anchor=%v", svc.scanRate, svc.scanAnchorAt)
 	}
 }
+
+// TestScanPhaseLabelBlocksAreSilent pins the one case that matters for the
+// status line: while blocks are replaying the label is empty, because the
+// measured rate describes that better than a word would. Every other phase is
+// a state the scan can sit in without blocks moving, and has to say so.
+func TestScanPhaseLabelBlocksAreSilent(t *testing.T) {
+	if got := scanPhaseLabel("block"); got != "" {
+		t.Fatalf("block phase label = %q, want empty", got)
+	}
+	for phase, want := range map[string]string{
+		"start":           "starting",
+		"headers_request": "fetching headers",
+		"headers":         "fetching headers",
+		"block_request":   "requesting blocks",
+		"block_wait":      "waiting for a block",
+		"block_error":     "retrying a block",
+		"peer_switch":     "switching peer",
+		"complete":        "finishing",
+	} {
+		if got := scanPhaseLabel(phase); got != want {
+			t.Fatalf("scanPhaseLabel(%q) = %q, want %q", phase, got, want)
+		}
+	}
+	// An unknown phase from a newer SDK is shown as-is rather than swallowed.
+	if got := scanPhaseLabel("something_new"); got != "something_new" {
+		t.Fatalf("unknown phase = %q, want it passed through", got)
+	}
+}

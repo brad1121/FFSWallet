@@ -66,6 +66,7 @@ type Snapshot struct {
 	SyncedHeight   int32
 	Scanning       bool
 	ScanRate       float64 // blocks per second, 0 until a window has elapsed
+	ScanPhase      string  // what the scan is doing; empty while replaying blocks
 	Status         NodeStatus
 }
 
@@ -98,6 +99,7 @@ type Service struct {
 	scanAnchorAt     time.Time
 	scanAnchorBlocks int
 	scanRate         float64
+	scanPhase        string
 }
 
 func NewService(baseDir string) *Service {
@@ -354,6 +356,43 @@ func (s *Service) resetScanRateLocked() {
 	s.scanAnchorAt = time.Time{}
 	s.scanAnchorBlocks = 0
 	s.scanRate = 0
+	s.scanPhase = ""
+}
+
+// setScanPhase records what the scan is doing now. Empty means it is replaying
+// blocks — the ordinary case, where the rate says more than a label would.
+func (s *Service) setScanPhase(phase string) {
+	s.mu.Lock()
+	s.scanPhase = phase
+	s.mu.Unlock()
+}
+
+// scanPhaseLabel turns an SDK rescan phase into something worth putting on the
+// status line. Block replay returns empty: that is what the rate describes,
+// and repeating it would crowd out the numbers. Everything else is a state the
+// scan can sit in without blocks moving, which is exactly when the line has to
+// say why.
+func scanPhaseLabel(phase string) string {
+	switch phase {
+	case "block":
+		return ""
+	case "start":
+		return "starting"
+	case "headers_request", "headers":
+		return "fetching headers"
+	case "block_request":
+		return "requesting blocks"
+	case "block_wait":
+		return "waiting for a block"
+	case "block_error":
+		return "retrying a block"
+	case "peer_switch":
+		return "switching peer"
+	case "complete":
+		return "finishing"
+	default:
+		return phase
+	}
 }
 
 // ScanRunning reports whether a rescan or catch-up is in flight.
@@ -494,6 +533,7 @@ func (s *Service) Snapshot() Snapshot {
 	snap.Scanning = s.scanCancel != nil
 	if snap.Scanning {
 		snap.ScanRate = s.scanRate
+		snap.ScanPhase = s.scanPhase
 	}
 	if s.wallet != nil {
 		snap.BalanceSats = s.wallet.Balance()

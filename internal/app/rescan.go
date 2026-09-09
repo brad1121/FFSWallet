@@ -127,6 +127,7 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 		return "", errors.New("wallet locked")
 	}
 
+	s.setScanPhase("waiting for peers")
 	s.publish(EventStatus, "waiting for peer before rescan")
 	deadline := time.Now().Add(time.Minute)
 	for node.PeerCount() == 0 {
@@ -161,6 +162,7 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 		},
 		GCEvery: rescanGCEvery,
 		Progress: func(progress bsvsdk.RescanProgress) {
+			s.setScanPhase(scanPhaseLabel(progress.Phase))
 			if progress.Phase == "block" {
 				s.noteScanProgress(progress.BlocksFetched)
 			}
