@@ -340,6 +340,8 @@ func (s *Service) handleReject(reject bsvsdk.Reject) {
 		reject.Peer, reject.Reason, reject.Code, reject.CodeName, shortTxID(txID), restored))
 
 	if missingInputsReject(reject.Reason) {
+		// Peers reject in parallel; one resync is enough, and rescanFromHash
+		// would refuse the rest anyway.
 		go s.resyncFromRejectedInputs(rec)
 	}
 }
@@ -438,7 +440,13 @@ func (s *Service) resyncFromRejectedInputs(rec store.TxRecord) {
 		return
 	}
 	s.publish(EventStatus, fmt.Sprintf("inputs missing on network; resyncing wallet from h=%d block=%s", from, shortTxID(hdr.Hash)))
-	if _, err := s.RebuildFromBlockHashAtHeight(hdr.Hash, from); err != nil {
+	// A plain rescan, not a rebuild. Replaying the blocks from here sees the
+	// transaction that actually spent these coins and marks them spent, which
+	// is the whole correction needed — and it reaches that state without
+	// wiping wallet state first. It also keeps a peer from being able to cost
+	// us our UTXO set: a reject is one peer's word, and this path is reachable
+	// by any peer we broadcast to.
+	if _, err := s.RescanFromBlockHashAtHeight(hdr.Hash, from); err != nil {
 		s.publish(EventError, "resync after rejected inputs: "+err.Error())
 	}
 }
