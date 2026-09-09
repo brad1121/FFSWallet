@@ -151,20 +151,47 @@ func TestFormatSatsAndShort(t *testing.T) {
 func TestFormatHeight(t *testing.T) {
 	cases := []struct {
 		chain, peer, synced int32
+		rate                float64
 		want                string
 	}{
-		{-1, -1, 0, "Height: — · not scanned"},
-		{850000, 850000, 0, "Height: 850000 · not scanned"},
-		{850000, 850000, 850000, "Height: 850000 · scanned to 850000"},
-		{850000, 850002, 850000, "Height: 850000 / 850002 (syncing) · scanned to 850000 (2 behind)"},
-		{850000, -1, 850000, "Height: 850000 · scanned to 850000"},
+		{-1, -1, 0, 0, "Height: — · not scanned"},
+		{850000, 850000, 0, 0, "Height: 850000 · not scanned"},
+		{850000, 850000, 850000, 0, "Height: 850000 · scanned to 850000"},
+		{850000, 850002, 850000, 0, "Height: 850000 / 850002 (syncing) · scanned to 850000 (2 behind)"},
+		{850000, -1, 850000, 0, "Height: 850000 · scanned to 850000"},
 		// A wallet reopened after a week: the node knows the tip from headers
 		// long before the scan has replayed the blocks up to it.
-		{849000, 850000, 849500, "Height: 849000 / 850000 (syncing) · scanned to 849500 (500 behind)"},
+		{849000, 850000, 849500, 0, "Height: 849000 / 850000 (syncing) · scanned to 849500 (500 behind)"},
+		// While a scan runs, the rate and what it implies for the remaining
+		// blocks is the part worth reading.
+		{849000, 850000, 849500, 33.2, "Height: 849000 / 850000 (syncing) · scanned to 849500 (500 behind, 33 blk/s, <1m left)"},
+		{849000, 850000, 840000, 4.5, "Height: 849000 / 850000 (syncing) · scanned to 840000 (10000 behind, 4.5 blk/s, ~37m left)"},
+		{849000, 850000, 800000, 4.5, "Height: 849000 / 850000 (syncing) · scanned to 800000 (50000 behind, 4.5 blk/s, ~3h05m left)"},
+		// Caught up but still scanning: rate without an estimate.
+		{850000, 850000, 850000, 12, "Height: 850000 · scanned to 850000, 12 blk/s"},
 	}
 	for _, c := range cases {
-		if got := formatHeight(c.chain, c.peer, c.synced); got != c.want {
-			t.Fatalf("formatHeight(%d,%d,%d): got %q want %q", c.chain, c.peer, c.synced, got, c.want)
+		if got := formatHeight(c.chain, c.peer, c.synced, c.rate); got != c.want {
+			t.Fatalf("formatHeight(%d,%d,%d,%v): got %q want %q", c.chain, c.peer, c.synced, c.rate, got, c.want)
+		}
+	}
+}
+
+func TestFormatETABuckets(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{30 * time.Second, "<1m left"},
+		{90 * time.Second, "~1m left"},
+		{45 * time.Minute, "~45m left"},
+		{90 * time.Minute, "~1h30m left"},
+		{26 * time.Hour, "~26h00m left"},
+		{72 * time.Hour, "~3d left"},
+	}
+	for _, c := range cases {
+		if got := formatETA(c.d); got != c.want {
+			t.Fatalf("formatETA(%s): got %q want %q", c.d, got, c.want)
 		}
 	}
 }

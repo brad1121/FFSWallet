@@ -65,6 +65,7 @@ type Snapshot struct {
 	History        []store.TxRecord
 	SyncedHeight   int32
 	Scanning       bool
+	ScanRate       float64 // blocks per second, 0 until a window has elapsed
 	Status         NodeStatus
 }
 
@@ -90,6 +91,13 @@ type Service struct {
 	// scanCancel stops the running rescan. Set for as long as one is in
 	// flight; nil otherwise, which is also how ScanRunning answers.
 	scanCancel context.CancelFunc
+
+	// Scan rate, measured over a moving window rather than for the whole run,
+	// so it reflects what the scan is doing now — peers and block sizes vary
+	// enough that a run average is not useful for deciding whether to wait.
+	scanAnchorAt     time.Time
+	scanAnchorBlocks int
+	scanRate         float64
 }
 
 func NewService(baseDir string) *Service {
@@ -315,6 +323,39 @@ func (s *Service) Unlock(passphrase string) error {
 	return nil
 }
 
+// scanRateWindow is how long a sample must run before it updates the rate.
+// Short enough to react to a scan speeding up or stalling, long enough not to
+// swing on one slow block.
+const scanRateWindow = 5 * time.Second
+
+// noteScanProgress records how far a scan has got, and every window computes
+// the rate over that window. Called once per replayed block.
+func (s *Service) noteScanProgress(blocks int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	if s.scanAnchorAt.IsZero() {
+		s.scanAnchorAt = now
+		s.scanAnchorBlocks = blocks
+		return
+	}
+	elapsed := now.Sub(s.scanAnchorAt)
+	if elapsed < scanRateWindow {
+		return
+	}
+	if delta := blocks - s.scanAnchorBlocks; delta > 0 {
+		s.scanRate = float64(delta) / elapsed.Seconds()
+	}
+	s.scanAnchorAt = now
+	s.scanAnchorBlocks = blocks
+}
+
+func (s *Service) resetScanRateLocked() {
+	s.scanAnchorAt = time.Time{}
+	s.scanAnchorBlocks = 0
+	s.scanRate = 0
+}
+
 // ScanRunning reports whether a rescan or catch-up is in flight.
 func (s *Service) ScanRunning() bool {
 	s.mu.RLock()
@@ -451,6 +492,9 @@ func (s *Service) Snapshot() Snapshot {
 	snap.History = append([]store.TxRecord(nil), s.payload.History...)
 	snap.SyncedHeight = s.payload.SyncedHeight
 	snap.Scanning = s.scanCancel != nil
+	if snap.Scanning {
+		snap.ScanRate = s.scanRate
+	}
 	if s.wallet != nil {
 		snap.BalanceSats = s.wallet.Balance()
 	} else {

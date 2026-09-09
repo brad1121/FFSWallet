@@ -81,10 +81,12 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 	defer cancelScan()
 	s.mu.Lock()
 	s.scanCancel = cancelScan
+	s.resetScanRateLocked()
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		s.scanCancel = nil
+		s.resetScanRateLocked()
 		s.mu.Unlock()
 	}()
 
@@ -159,6 +161,9 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 		},
 		GCEvery: rescanGCEvery,
 		Progress: func(progress bsvsdk.RescanProgress) {
+			if progress.Phase == "block" {
+				s.noteScanProgress(progress.BlocksFetched)
+			}
 			if !shouldPublishRescanProgress(progress, lastProgress) {
 				return
 			}

@@ -809,7 +809,7 @@ func (u *UI) refresh() {
 	u.balanceLabel.SetText("Balance: " + formatSats(snap.BalanceSats))
 	u.networkLabel.SetText("Network: " + walletapp.NetworkLabel(snap.Network))
 	u.peerLabel.SetText(fmt.Sprintf("Peers: %d", snap.Status.PeerCount))
-	u.heightLabel.SetText(formatHeight(snap.Status.ChainHeight, snap.Status.BestPeerHeight, snap.SyncedHeight))
+	u.heightLabel.SetText(formatHeight(snap.Status.ChainHeight, snap.Status.BestPeerHeight, snap.SyncedHeight, snap.ScanRate))
 	if u.stopScan != nil {
 		if snap.Scanning {
 			u.stopScan.Enable()
@@ -1256,7 +1256,7 @@ func formatSats(sats int64) string {
 // height advertised by peers. When peers are ahead the wallet is still
 // catching up, so show both as "chain / peer (syncing)"; otherwise show the
 // single synced height.
-func formatHeight(chain, peer, synced int32) string {
+func formatHeight(chain, peer, synced int32, scanRate float64) string {
 	base := "Height: —"
 	switch {
 	case chain < 0 && peer < 0:
@@ -1271,9 +1271,44 @@ func formatHeight(chain, peer, synced int32) string {
 		return base + " · not scanned"
 	}
 	if peer > synced {
-		return base + fmt.Sprintf(" · scanned to %d (%d behind)", synced, peer-synced)
+		behind := peer - synced
+		return base + fmt.Sprintf(" · scanned to %d (%d behind%s)", synced, behind, formatScanRate(scanRate, behind))
 	}
-	return base + fmt.Sprintf(" · scanned to %d", synced)
+	return base + fmt.Sprintf(" · scanned to %d%s", synced, formatScanRate(scanRate, 0))
+}
+
+// formatScanRate renders the live scan speed, and how long the remaining
+// blocks will take at that speed — the number that answers whether a scan is
+// worth waiting for. Empty until a rate has actually been measured.
+func formatScanRate(rate float64, behind int32) string {
+	if rate <= 0 {
+		return ""
+	}
+	out := fmt.Sprintf(", %s blk/s", trimRate(rate))
+	if behind > 0 {
+		out += ", " + formatETA(time.Duration(float64(behind)/rate)*time.Second)
+	}
+	return out
+}
+
+func trimRate(rate float64) string {
+	if rate >= 10 {
+		return strconv.FormatFloat(rate, 'f', 0, 64)
+	}
+	return strconv.FormatFloat(rate, 'f', 1, 64)
+}
+
+func formatETA(d time.Duration) string {
+	switch {
+	case d >= 48*time.Hour:
+		return fmt.Sprintf("~%dd left", int(d.Hours()/24))
+	case d >= time.Hour:
+		return fmt.Sprintf("~%dh%02dm left", int(d.Hours()), int(d.Minutes())%60)
+	case d >= time.Minute:
+		return fmt.Sprintf("~%dm left", int(d.Minutes()))
+	default:
+		return "<1m left"
+	}
 }
 
 func short(txid string) string {

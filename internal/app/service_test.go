@@ -298,3 +298,45 @@ func TestClonePayloadDeepCopy(t *testing.T) {
 		t.Fatalf("source mutated: %#v", src.Addresses)
 	}
 }
+
+// TestNoteScanProgressMeasuresOverWindow pins the rate as a moving-window
+// measurement: the first sample only anchors, nothing is reported until a
+// window has actually elapsed, and the answer reflects that window rather than
+// the whole run.
+func TestNoteScanProgressMeasuresOverWindow(t *testing.T) {
+	svc := NewService(t.TempDir())
+
+	svc.noteScanProgress(0)
+	if svc.scanRate != 0 {
+		t.Fatalf("rate reported from the anchoring sample: %v", svc.scanRate)
+	}
+
+	// Too soon: still inside the window, so the anchor must not move.
+	svc.noteScanProgress(10)
+	if svc.scanRate != 0 {
+		t.Fatalf("rate reported inside the window: %v", svc.scanRate)
+	}
+
+	// Backdate the anchor so a full window has passed with 200 blocks done.
+	svc.scanAnchorAt = time.Now().Add(-10 * time.Second)
+	svc.scanAnchorBlocks = 0
+	svc.noteScanProgress(200)
+	if svc.scanRate < 19 || svc.scanRate > 21 {
+		t.Fatalf("rate = %v, want about 20 blocks/sec", svc.scanRate)
+	}
+
+	// A stalled scan must not keep reporting the old rate as fact once a new
+	// window closes with no progress — the anchor moves, the rate holds until
+	// there is something to measure.
+	svc.scanAnchorAt = time.Now().Add(-10 * time.Second)
+	before := svc.scanRate
+	svc.noteScanProgress(200)
+	if svc.scanRate != before {
+		t.Fatalf("rate changed with no blocks replayed: %v -> %v", before, svc.scanRate)
+	}
+
+	svc.resetScanRateLocked()
+	if svc.scanRate != 0 || !svc.scanAnchorAt.IsZero() {
+		t.Fatalf("reset left state behind: rate=%v anchor=%v", svc.scanRate, svc.scanAnchorAt)
+	}
+}
