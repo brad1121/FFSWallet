@@ -41,6 +41,7 @@ type UI struct {
 	eventSeen  map[string]struct{}
 	eventText  string
 	eventSync  bool
+	stopScan   *widget.Button
 	lastAddrs  []store.AddressRecord
 	lastUTXOs  []store.UTXORecord
 	lastTxs    []store.TxRecord
@@ -722,6 +723,21 @@ func (u *UI) settingsTab() fyne.CanvasObject {
 	rescanHash.OnSubmitted = func(string) {
 		startRescan.OnTapped()
 	}
+	// A scan runs until it reaches the tip, which can be hours. Stopping keeps
+	// every block replayed so far; only progress since the last checkpoint is
+	// lost, and the next catch-up resumes from there.
+	stopScan := widget.NewButtonWithIcon("Stop scan", theme.CancelIcon(), func() {
+		if err := u.svc.StopScan(); err != nil {
+			dialog.ShowError(err, u.win)
+			return
+		}
+		rescanStatus.SetText("Stopping scan...")
+	})
+	stopScan.Importance = widget.DangerImportance
+	if !u.svc.ScanRunning() {
+		stopScan.Disable()
+	}
+	u.stopScan = stopScan
 	rebroadcastStatus := widget.NewLabel("")
 	rebroadcastStatus.Wrapping = fyne.TextWrapWord
 	var rebroadcast *widget.Button
@@ -773,7 +789,7 @@ func (u *UI) settingsTab() fyne.CanvasObject {
 		rescanHeight,
 		rescanRebuild,
 		rescanRebuildHelp,
-		startRescan,
+		container.NewHBox(startRescan, stopScan),
 		rescanStatus,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Pending transactions", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -794,6 +810,13 @@ func (u *UI) refresh() {
 	u.networkLabel.SetText("Network: " + walletapp.NetworkLabel(snap.Network))
 	u.peerLabel.SetText(fmt.Sprintf("Peers: %d", snap.Status.PeerCount))
 	u.heightLabel.SetText(formatHeight(snap.Status.ChainHeight, snap.Status.BestPeerHeight, snap.SyncedHeight))
+	if u.stopScan != nil {
+		if snap.Scanning {
+			u.stopScan.Enable()
+		} else {
+			u.stopScan.Disable()
+		}
+	}
 	addr := snap.ReceiveAddress
 	if addr == "" {
 		addr = "-"

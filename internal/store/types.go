@@ -62,6 +62,18 @@ type UTXORecord struct {
 	SeenAt    time.Time `json:"seen_at"`
 }
 
+// SpentInput is a UTXO a broadcast transaction consumed. Kept so a rejected
+// transaction can be undone: the wallet applied the spend optimistically when
+// it built the tx, and without the inputs there is no way to put the coins
+// back except a full rescan.
+type SpentInput struct {
+	TxID      string `json:"txid"`
+	Vout      uint32 `json:"vout"`
+	Value     int64  `json:"value"`
+	ScriptHex string `json:"script_hex"`
+	Height    int32  `json:"height"`
+}
+
 type TxRecord struct {
 	TxID      string    `json:"txid"`
 	Vout      uint32    `json:"vout,omitempty"`
@@ -73,6 +85,9 @@ type TxRecord struct {
 	SeenAt    time.Time `json:"seen_at"`
 	Note      string    `json:"note,omitempty"`
 	RawHex    string    `json:"raw_hex,omitempty"`
+	// SpentInputs is set on outgoing records so a network rejection can
+	// restore the coins the transaction tried to spend.
+	SpentInputs []SpentInput `json:"spent_inputs,omitempty"`
 }
 
 func DefaultPayload(network string) *Payload {

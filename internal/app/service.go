@@ -64,6 +64,7 @@ type Snapshot struct {
 	UTXOs          []store.UTXORecord
 	History        []store.TxRecord
 	SyncedHeight   int32
+	Scanning       bool
 	Status         NodeStatus
 }
 
@@ -85,6 +86,10 @@ type Service struct {
 	statusStop    chan struct{}
 	p2pTraffic    bool
 	pendingSeeded bool
+
+	// scanCancel stops the running rescan. Set for as long as one is in
+	// flight; nil otherwise, which is also how ScanRunning answers.
+	scanCancel context.CancelFunc
 }
 
 func NewService(baseDir string) *Service {
@@ -310,6 +315,28 @@ func (s *Service) Unlock(passphrase string) error {
 	return nil
 }
 
+// ScanRunning reports whether a rescan or catch-up is in flight.
+func (s *Service) ScanRunning() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.scanCancel != nil
+}
+
+// StopScan cancels the running rescan. Blocks already replayed keep their
+// wallet state and the sync cursor keeps whatever the last checkpoint wrote,
+// so stopping loses progress only back to that checkpoint, not to the start.
+func (s *Service) StopScan() error {
+	s.mu.Lock()
+	cancel := s.scanCancel
+	s.mu.Unlock()
+	if cancel == nil {
+		return errors.New("no scan running")
+	}
+	cancel()
+	s.publish(EventStatus, "stopping scan on request")
+	return nil
+}
+
 // runCatchUp drives CatchUp and reports through the event log; the rescan
 // itself publishes its own progress and completion.
 func (s *Service) runCatchUp() {
@@ -423,6 +450,7 @@ func (s *Service) Snapshot() Snapshot {
 	snap.UTXOs = append([]store.UTXORecord(nil), s.payload.UTXOs...)
 	snap.History = append([]store.TxRecord(nil), s.payload.History...)
 	snap.SyncedHeight = s.payload.SyncedHeight
+	snap.Scanning = s.scanCancel != nil
 	if s.wallet != nil {
 		snap.BalanceSats = s.wallet.Balance()
 	} else {
@@ -619,6 +647,9 @@ func (s *Service) wireRuntimeLocked(node *bsvsdk.Node, wallet *bsvsdk.Wallet) {
 			s.publishLocked(EventReject, formatReject(reject))
 		}
 		s.mu.Unlock()
+		if active {
+			s.handleReject(reject)
+		}
 	})
 	node.OnP2PTraffic(func(traffic bsvsdk.P2PTraffic) {
 		s.mu.RLock()

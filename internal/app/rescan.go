@@ -74,6 +74,20 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 	}
 	defer s.scanMu.Unlock()
 
+	// A rescan pulls full blocks for as long as it takes to reach the tip, so
+	// the user needs to be able to call it off. Progress up to the last
+	// checkpoint is already durable when the cancel lands.
+	scanCtx, cancelScan := context.WithCancel(context.Background())
+	defer cancelScan()
+	s.mu.Lock()
+	s.scanCancel = cancelScan
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.scanCancel = nil
+		s.mu.Unlock()
+	}()
+
 	var original []store.UTXORecord
 	if rebuild {
 		s.mu.Lock()
@@ -114,6 +128,9 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 	s.publish(EventStatus, "waiting for peer before rescan")
 	deadline := time.Now().Add(time.Minute)
 	for node.PeerCount() == 0 {
+		if scanCtx.Err() != nil {
+			return "", errScanStopped
+		}
 		if time.Now().After(deadline) {
 			err := errors.New("rescan: no connected peers")
 			if rebuild {
@@ -130,7 +147,7 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 		s.publish(EventStatus, "rescan started")
 	}
 	lastProgress := time.Time{}
-	stats, err := wallet.RescanFromHash(context.Background(), target.Hash, bsvsdk.RescanOptions{
+	stats, err := wallet.RescanFromHash(scanCtx, target.Hash, bsvsdk.RescanOptions{
 		MaxBlocks:                 1_000_000,
 		BlockTimeout:              5 * time.Minute,
 		BlockProgressInterval:     30 * time.Second,
@@ -150,6 +167,15 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 		},
 	})
 	if err != nil {
+		// A stop is not a failure: the blocks replayed so far are real, and a
+		// rebuild's cleared UTXOs have been repopulated as far as the scan
+		// got. Tearing that back down would throw away the work.
+		if errors.Is(err, context.Canceled) || scanCtx.Err() != nil {
+			s.recordScanProgress(wallet, runtime, stats)
+			msg := fmt.Sprintf("scan stopped: %d blocks, %d transactions", stats.BlocksFetched, stats.TxsReplayed)
+			s.publish(EventStatus, msg)
+			return msg, nil
+		}
 		if rebuild {
 			s.restoreUTXOsAfterRebuild(original, wallet)
 		}
@@ -193,6 +219,31 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 	msg := fmt.Sprintf("%s complete: %d blocks, %d transactions", mode, stats.BlocksFetched, stats.TxsReplayed)
 	s.publish(EventStatus, msg)
 	return msg, nil
+}
+
+// errScanStopped marks a scan the user called off, so callers can tell it
+// apart from a scan that failed.
+var errScanStopped = errors.New("scan stopped")
+
+// recordScanProgress persists whatever a scan reached — used when it ends
+// early, where the blocks already replayed are still real wallet state.
+func (s *Service) recordScanProgress(wallet *bsvsdk.Wallet, runtime *bsvsdk.Runtime, stats *bsvsdk.RescanStats) {
+	if runtime != nil {
+		if _, err := runtime.ReloadStore(context.Background()); err != nil {
+			s.publish(EventError, "reload SDK store: "+err.Error())
+		}
+	}
+	s.mu.Lock()
+	if s.wallet == wallet && s.payload != nil {
+		s.refreshUTXOsLocked()
+		if stats != nil {
+			s.advanceSyncCursorLocked(displayBlockHash(stats.StoppedAt), stats.StoppedHeight)
+		}
+		if err := s.saveLocked(); err != nil {
+			s.publishLocked(EventError, "save after scan stop: "+err.Error())
+		}
+	}
+	s.mu.Unlock()
 }
 
 func (s *Service) saveRescanCheckpoint(activeWallet *bsvsdk.Wallet, snapshot []bsvsdk.UTXO, node *bsvsdk.Node, lastBlock [32]byte) {

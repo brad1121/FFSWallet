@@ -73,14 +73,15 @@ func (s *Service) Send(to string, satoshis int64) (string, error) {
 	}
 	s.refreshUTXOsLocked()
 	s.appendHistoryLocked(store.TxRecord{
-		TxID:      detail.TxID,
-		Direction: "out",
-		Address:   to,
-		Amount:    -satoshis,
-		Height:    -1,
-		Status:    "broadcast",
-		SeenAt:    time.Now().UTC(),
-		RawHex:    hex.EncodeToString(detail.RawTx),
+		TxID:        detail.TxID,
+		Direction:   "out",
+		Address:     to,
+		Amount:      -satoshis,
+		Height:      -1,
+		Status:      "broadcast",
+		SeenAt:      time.Now().UTC(),
+		RawHex:      hex.EncodeToString(detail.RawTx),
+		SpentInputs: spentInputs(detail.SpentUTXOs),
 	})
 	if err := s.saveLocked(); err != nil {
 		return "", err
@@ -133,15 +134,16 @@ func (s *Service) SendAll(to string) (string, error) {
 	}
 	s.refreshUTXOsLocked()
 	s.appendHistoryLocked(store.TxRecord{
-		TxID:      detail.TxID,
-		Direction: "out",
-		Address:   to,
-		Amount:    -before,
-		Height:    -1,
-		Status:    "broadcast",
-		SeenAt:    time.Now().UTC(),
-		Note:      "send all",
-		RawHex:    hex.EncodeToString(detail.RawTx),
+		TxID:        detail.TxID,
+		Direction:   "out",
+		Address:     to,
+		Amount:      -before,
+		Height:      -1,
+		Status:      "broadcast",
+		SeenAt:      time.Now().UTC(),
+		Note:        "send all",
+		RawHex:      hex.EncodeToString(detail.RawTx),
+		SpentInputs: spentInputs(detail.SpentUTXOs),
 	})
 	if err := s.saveLocked(); err != nil {
 		return "", err
@@ -223,6 +225,23 @@ func (s *Service) markOutgoingRelayedLocked(txID string) bool {
 	return changed
 }
 
+func spentInputs(utxos []bsvsdk.UTXO) []store.SpentInput {
+	if len(utxos) == 0 {
+		return nil
+	}
+	out := make([]store.SpentInput, 0, len(utxos))
+	for _, u := range utxos {
+		out = append(out, store.SpentInput{
+			TxID:      u.TxID,
+			Vout:      u.Vout,
+			Value:     u.Value,
+			ScriptHex: hex.EncodeToString(u.Script),
+			Height:    u.Height,
+		})
+	}
+	return out
+}
+
 func spendValue(utxos []bsvsdk.UTXO) int64 {
 	var total int64
 	for _, u := range utxos {
@@ -253,4 +272,173 @@ func pendingRawTxs(history []store.TxRecord) []pendingRawTx {
 		pending = append(pending, pendingRawTx{txID: tx.TxID, rawHex: tx.RawHex})
 	}
 	return pending
+}
+
+// Reject codes we care about. A peer that already has the transaction answers
+// with RejectDuplicate — that is successful relay, not a failure.
+const (
+	rejectDuplicate = 0x12
+)
+
+// missingInputsReject reports whether a rejection means the peer could not
+// find the coins the transaction spends. That is not a bad transaction: it
+// says the wallet's idea of which coins it owns disagrees with the network,
+// usually because those coins were already spent somewhere the wallet never
+// saw.
+func missingInputsReject(reason string) bool {
+	reason = strings.ToLower(reason)
+	for _, marker := range []string{"missing-inputs", "missing inputs", "missingorspent", "bad-txns-inputs"} {
+		if strings.Contains(reason, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// handleReject reacts to a peer rejecting one of our own broadcasts. A reject
+// from a single peer is not proof the network refused the transaction — peers
+// reject for local policy reasons, and a duplicate reject means the opposite —
+// so only a genuine rejection of a transaction we sent discards it.
+func (s *Service) handleReject(reject bsvsdk.Reject) {
+	if !strings.EqualFold(strings.TrimSpace(reject.Command), "tx") {
+		return
+	}
+	txID := strings.ToLower(strings.TrimSpace(reject.Hash))
+	if txID == "" {
+		return
+	}
+
+	s.mu.Lock()
+	if s.payload == nil {
+		s.mu.Unlock()
+		return
+	}
+	rec, found := s.findOutgoingLocked(txID)
+	if !found {
+		// Not ours — someone else's transaction relayed past us.
+		s.mu.Unlock()
+		return
+	}
+	if reject.Code == rejectDuplicate {
+		// The peer already has it: the broadcast worked.
+		if s.markOutgoingRelayedLocked(txID) {
+			if err := s.saveLocked(); err != nil {
+				s.publishLocked(EventError, err.Error())
+			}
+		}
+		s.mu.Unlock()
+		return
+	}
+
+	restored := s.discardRejectedLocked(rec, reject)
+	if err := s.saveLocked(); err != nil {
+		s.publishLocked(EventError, err.Error())
+	}
+	s.mu.Unlock()
+
+	s.publish(EventError, fmt.Sprintf("transaction rejected by %s: %s (code 0x%02x/%s) — tx=%s discarded, %d input(s) returned to balance",
+		reject.Peer, reject.Reason, reject.Code, reject.CodeName, shortTxID(txID), restored))
+
+	if missingInputsReject(reject.Reason) {
+		go s.resyncFromRejectedInputs(rec)
+	}
+}
+
+func (s *Service) findOutgoingLocked(txID string) (store.TxRecord, bool) {
+	for _, rec := range s.payload.History {
+		if strings.EqualFold(rec.TxID, txID) && rec.Direction == "out" {
+			return rec, true
+		}
+	}
+	return store.TxRecord{}, false
+}
+
+// discardRejectedLocked removes a rejected transaction from history and puts
+// the coins it spent back, so the balance stops counting them as gone.
+// Returns how many inputs were restored.
+func (s *Service) discardRejectedLocked(rec store.TxRecord, reject bsvsdk.Reject) int {
+	kept := s.payload.History[:0]
+	for _, h := range s.payload.History {
+		if strings.EqualFold(h.TxID, rec.TxID) && h.Direction == "out" {
+			continue
+		}
+		kept = append(kept, h)
+	}
+	s.payload.History = append([]store.TxRecord(nil), kept...)
+
+	if s.wallet == nil {
+		return 0
+	}
+	// Drop any change output the rejected transaction created: it does not
+	// exist, and leaving it would overstate the balance.
+	for _, u := range s.payload.UTXOs {
+		if strings.EqualFold(u.TxID, rec.TxID) {
+			s.wallet.UntrackUTXO(u.TxID, u.Vout)
+		}
+	}
+	restored := 0
+	for _, in := range rec.SpentInputs {
+		script, err := hex.DecodeString(in.ScriptHex)
+		if err != nil {
+			s.publishLocked(EventError, fmt.Sprintf("restore input %s:%d decode: %v", shortTxID(in.TxID), in.Vout, err))
+			continue
+		}
+		if err := s.wallet.ForceImportUTXO(in.TxID, in.Vout, in.Value, script, in.Height); err != nil {
+			s.publishLocked(EventError, fmt.Sprintf("restore input %s:%d: %v", shortTxID(in.TxID), in.Vout, err))
+			continue
+		}
+		restored++
+	}
+	s.refreshUTXOsLocked()
+	return restored
+}
+
+// resyncFromRejectedInputs handles the case where the network says the coins
+// we tried to spend are not there. The wallet is out of sync from at least as
+// far back as the oldest of those coins, so it rescans from that block rather
+// than from the network checkpoint — the wallet already recorded the height it
+// believed each coin was created at, and everything from the earliest of them
+// forward is what needs re-deriving from chain truth.
+func (s *Service) resyncFromRejectedInputs(rec store.TxRecord) {
+	s.mu.RLock()
+	node := s.node
+	network := ""
+	if s.payload != nil {
+		network = s.payload.Network
+	}
+	s.mu.RUnlock()
+	if node == nil {
+		return
+	}
+
+	from := int32(-1)
+	for _, in := range rec.SpentInputs {
+		if in.Height <= 0 {
+			// An unconfirmed input we never saw mined: nothing to anchor on.
+			continue
+		}
+		if from < 0 || in.Height < from {
+			from = in.Height
+		}
+	}
+	if from < 0 {
+		s.publish(EventError, "rejected transaction spent unconfirmed inputs; run a rebuild rescan to resync")
+		return
+	}
+	// Start one block before the earliest disputed coin so the block that
+	// created it is replayed too.
+	if from > 1 {
+		from--
+	}
+
+	hdr, ok := node.HeaderByHeight(from)
+	if !ok {
+		s.publish(EventError, fmt.Sprintf("cannot resolve block at h=%d to resync from; run a rebuild rescan from %s",
+			from, DefaultRescanStartLabel(network)))
+		return
+	}
+	s.publish(EventStatus, fmt.Sprintf("inputs missing on network; resyncing wallet from h=%d block=%s", from, shortTxID(hdr.Hash)))
+	if _, err := s.RebuildFromBlockHashAtHeight(hdr.Hash, from); err != nil {
+		s.publish(EventError, "resync after rejected inputs: "+err.Error())
+	}
 }
