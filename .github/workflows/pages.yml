@@ -1,10 +1,15 @@
 name: Pages
 
 on:
+  # A release published by the Release workflow does NOT fire this event:
+  # GitHub does not let events generated with GITHUB_TOKEN trigger further
+  # workflows, so the mirror is driven by workflow_call from Release instead.
+  # This trigger still covers a release published by hand or by a PAT.
   release:
     types:
       - published
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

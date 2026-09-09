@@ -233,3 +233,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release/*
+
+  pages:
+    name: Mirror release to Pages
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: publish
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml
