@@ -115,3 +115,38 @@ func TestCatchUpRequiresUnlockedWallet(t *testing.T) {
 		t.Fatal("expected a locked-wallet error")
 	}
 }
+
+// TestResolveRescanTargetRequiresHeightForUnknownHash: a rescan without a
+// height stamps everything unconfirmed and never moves the cursor, so no
+// catch-up would run again. A hash the node cannot place must be refused
+// rather than scanned heightless.
+func TestResolveRescanTargetRequiresHeightForUnknownHash(t *testing.T) {
+	svc := NewService(t.TempDir())
+	svc.payload = &store.Payload{Network: NetworkTestnet}
+
+	hash := "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+	if _, err := svc.resolveRescanTarget(hash, 0); err == nil {
+		t.Fatal("expected an error for a heightless hash the node does not know")
+	}
+	target, err := svc.resolveRescanTarget(hash, 1720000)
+	if err != nil {
+		t.Fatalf("resolve with explicit height: %v", err)
+	}
+	if target.StartHeight != 1720000 {
+		t.Fatalf("start height: got %d want 1720000", target.StartHeight)
+	}
+}
+
+// TestRestorePreRebuildStateRewindsCursor: a rebuild rewinds the cursor to its
+// start before wiping. If it then fails having replayed nothing, the old set
+// comes back and the cursor has to come back with it, or the wallet holds
+// UTXOs from one height under a cursor from another.
+func TestRestorePreRebuildStateRewindsCursor(t *testing.T) {
+	svc := NewService(t.TempDir())
+	svc.payload = &store.Payload{Network: NetworkTestnet, SyncedHash: "start", SyncedHeight: 1713168}
+
+	svc.restorePreRebuildCursorLocked(preRebuildState{syncedHash: "old", syncedHeight: 1750000})
+	if svc.payload.SyncedHash != "old" || svc.payload.SyncedHeight != 1750000 {
+		t.Fatalf("cursor after restore: got %q/%d want old/1750000", svc.payload.SyncedHash, svc.payload.SyncedHeight)
+	}
+}

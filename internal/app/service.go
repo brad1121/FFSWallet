@@ -115,6 +115,12 @@ func (s *Service) Close() {
 	s.stopRuntimeLocked(true)
 }
 
+// Note puts a line in the event log on behalf of the UI — for things the
+// service did not itself observe, such as the startup version check.
+func (s *Service) Note(kind EventType, message string) {
+	s.publish(kind, message)
+}
+
 func (s *Service) Events() <-chan Event {
 	return s.events
 }
@@ -417,17 +423,51 @@ func (s *Service) StopScan() error {
 	return nil
 }
 
+// catchUpAttempts is how many times an unlock's catch-up is started before
+// its failure is left with the user. Each attempt resumes from the cursor, so
+// a retry costs only the blocks since the last checkpoint.
+const catchUpAttempts = 4
+
+// catchUpRetryDelay is the wait before the first retry; each later one waits
+// twice as long, so peers have time to change before the same ask goes out.
+const catchUpRetryDelay = 15 * time.Second
+
 // runCatchUp drives CatchUp and reports through the event log; the rescan
 // itself publishes its own progress and completion.
+//
+// A catch-up that fails partway is a wrong balance until it is run again, and
+// the usual cause — a peer that stopped serving headers or blocks — is gone
+// by the time anyone reads the error. So a failed catch-up is retried from
+// the cursor a few times before the error is left standing. A stop by the
+// user is not a failure and is not retried.
 func (s *Service) runCatchUp() {
-	msg, err := s.CatchUp()
-	if err != nil {
-		s.publish(EventError, "catch-up: "+err.Error())
-		return
+	delay := catchUpRetryDelay
+	for attempt := 1; ; attempt++ {
+		msg, err := s.CatchUp()
+		if err == nil {
+			if msg == "" {
+				s.publish(EventStatus, "no sync cursor yet; run a rescan to establish one")
+			}
+			return
+		}
+		if attempt >= catchUpAttempts || !catchUpErrorRetriable(err) {
+			s.publish(EventError, "catch-up: "+err.Error())
+			return
+		}
+		s.publish(EventError, fmt.Sprintf("catch-up attempt %d failed, retrying in %s: %s", attempt, delay, err.Error()))
+		time.Sleep(delay)
+		delay *= 2
 	}
-	if msg == "" {
-		s.publish(EventStatus, "no sync cursor yet; run a rescan to establish one")
+}
+
+// catchUpErrorRetriable says whether starting the catch-up again could help.
+// A locked wallet or a scan already in progress will not change by waiting.
+func catchUpErrorRetriable(err error) bool {
+	if err == nil {
+		return false
 	}
+	msg := err.Error()
+	return !strings.Contains(msg, "wallet locked") && !strings.Contains(msg, "already running")
 }
 
 func (s *Service) Lock() {

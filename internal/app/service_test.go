@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -366,5 +367,20 @@ func TestScanPhaseLabelBlocksAreSilent(t *testing.T) {
 	// An unknown phase from a newer SDK is shown as-is rather than swallowed.
 	if got := scanPhaseLabel("something_new"); got != "something_new" {
 		t.Fatalf("unknown phase = %q, want it passed through", got)
+	}
+}
+
+func TestCatchUpErrorRetriable(t *testing.T) {
+	if catchUpErrorRetriable(nil) {
+		t.Fatal("nil error is not retriable")
+	}
+	if catchUpErrorRetriable(errors.New("wallet locked")) {
+		t.Fatal("a locked wallet does not change by waiting")
+	}
+	if catchUpErrorRetriable(errors.New("a rescan is already running")) {
+		t.Fatal("a running scan must not be piled on")
+	}
+	if !catchUpErrorRetriable(errors.New("rescan: await headers: timeout")) {
+		t.Fatal("a peer failure is worth another attempt")
 	}
 }

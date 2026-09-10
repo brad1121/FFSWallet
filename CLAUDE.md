@@ -44,12 +44,33 @@ checkpoint to paper over it. It has now been introduced three separate ways:
 - **A stale peer pool.** The parallel prefetch captured `ConnectedPeers()` once
   at scan start. Peers churn constantly; after a few hours the pool held only
   dead connections while healthy peers sat unused.
+- **The node's own header sync read as a wrong-chain reply.** The manager
+  syncs headers on the same connection, and every 2000-header rescan page
+  makes it ask again from its tip. Those replies are full pages of *our* chain
+  that do not build on the cursor, so they failed the "builds on the cursor"
+  check as a foreign chain and cost the walk its peer — and with the candidate
+  list captured once at scan start, eventually the walk. Not silent, but it
+  ended catch-ups early with an error and no cursor advance. A page whose
+  blocks the manager already indexes is stale traffic, and is skipped.
 
 The lesson: **a headers page must be proven to be the reply to our own
 getheaders before it is acted on.** Both the "builds on the cursor" check and
 the "empty only means caught up at the tip" check exist for this. Do not relax
 either. `awaitHeadersFrom` in `sdk/sdk.go` is the single place this is enforced;
 `RescanFromHash` and `ScanBlocks` both go through it.
+
+A cousin with the same signature, in the SDK wallet rather than the walk:
+**the in-memory UTXO set drifting from the store.** The sqlite store is the
+truth (`AvailableCoins`: owned outputs minus live spends minus conflicted
+txs) and `LoadFromStore` rebuilds memory from it at unlock. But ingest used to
+add any owned output it did not already hold, so a catch-up replaying the
+block that *created* an output the mempool had already shown *spent*, or a
+rebroadcast chain arriving child-before-parent, put spent coins back into the
+balance until the spender happened to be seen again. The store was right the
+whole time, which is why `ReloadFromStore` at scan end quietly fixed it — and
+why a scan that died early left the wrong figure standing. Ingest now asks the
+store's spend index and conflict flag before adding (`storeKnowsSpentLocked`).
+Memory must mirror `AvailableCoins`; never let it drift.
 
 Related height bugs with the same signature — wrong balance, no error:
 
@@ -82,6 +103,19 @@ Breaking any of these produces a wrong balance with no error:
 - **Header tip and peer heights only move forward.**
 - **The prefetch window is bounded by bytes, not just count.** Block sizes vary
   by orders of magnitude; a count alone is not a memory bound.
+- **Blocks are unbounded and a block is never refused for its size.** Testnet
+  has ~1 GB blocks around height 1734200; mainnet has had 4 GB. A block at or
+  above `RescanOptions.StreamBlockBytes` (64 MiB) is never buffered: the
+  fetcher's payload streamer (`Peer.SetPayloadStreamer`, `streamBlock` in
+  `sdk/sdk.go`) waits until the replay head reaches that block, then decodes
+  and applies one transaction at a time straight off the socket, and checks
+  the merkle root from the txids it collected. Once streaming has started the
+  block timeout is off — asking another peer for it would replay it twice.
+  The peer's 256 MiB `MaxNormalPayload` is only a bound on what gets
+  *buffered*: an oversize payload nobody streams is drained and dropped, not
+  a disconnect. The old reader disconnected the peer with "payload too
+  large", so every ~1 GB block was unfetchable and the scan sat at its height
+  forever, timing out against every peer in turn.
 - **A reject is one peer's opinion.** `RejectDuplicate` (0x12) means the peer
   already had the transaction — that is successful relay, not failure. Only a
   genuine rejection of a transaction we sent discards it. The missing-inputs
@@ -114,6 +148,28 @@ Also worth knowing: `go test -race ./...` and `gofmt -l` are clean on this repo,
 but the SDK has some pre-existing unformatted files (`sdk/sdk_test.go`,
 `internal/p2p/{addrman,mempool,message}.go`) — don't sweep those into a diff.
 
+## GUI
+
+The window must never ask the compositor to grow. Sway re-centres a floating
+XWayland window on every size request a client makes
+(`container_floating_resize_and_center` in its `handle_request_configure`),
+and Fyne makes one whenever the content's minimum size outgrows the window. A
+tab laid out as a plain `VBox` taller than the window, or a status label whose
+text runs wider than it, snaps a window the user has just moved back to the
+centre of the screen on the next repaint. Labels whose text changes at runtime
+truncate (`Truncation = fyne.TextTruncateEllipsis`) or wrap, tall tabs sit in
+a `VScroll`, and `TestMainLayoutFitsInitialWindow` checks every screen's
+`MinSize` against the 1040x700 initial window.
+
+That alone was not enough. Fyne's `EnsureMinSize` reports true whenever the
+root object's minimum *changes*, and the driver loop then calls `SetSize` with
+the size the window already has — still a configure request, still a
+re-centre. It also re-requests the size on every `Window.SetContent`. So the
+window's content is set once, to a root container with `fixedMinLayout`, whose
+`MinSize` is a constant; screens are swapped in as its child via
+`setContent`. `TestRootMinSizeNeverChanges` holds that line. Do not call
+`u.win.SetContent` from a screen.
+
 ## Release
 
 Tag `vX.Y.Z` on `master`. The Release workflow packages Linux/macOS/Windows,
@@ -130,6 +186,14 @@ Two things that were not obvious:
 - **The `github-pages` environment needs a `v*` tag deployment policy.**
   Releases run from a tag ref, and the environment originally allowed only the
   `master` branch, so the deploy job was rejected before any step ran.
+
+The Pages build also writes `latest.json` (`tag`, `version`, `name`,
+`published_at`, `url`) next to `index.html`. The wallet reads it at startup
+(`internal/update`) to tell whether it is behind, falling back to the GitHub
+releases API when the site has no `latest.json` yet. Keep those field names
+stable. A plain `go build` reports Fyne's default version `0.0.1` and is not
+compared — it only logs the latest release — so the banner only ever shows on
+a packaged (`fyne package --release`) build.
 
 Verify a release by simulating CI exactly — fresh clones of both repos (so no
 `go.work`), `go mod edit -replace`, `go test ./...`, and a real binary build —

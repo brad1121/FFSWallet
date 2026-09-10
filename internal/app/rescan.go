@@ -61,9 +61,24 @@ func (s *Service) resolveRescanTarget(startHash string, startHeight int32) (Resc
 	if s.payload != nil {
 		network = s.payload.Network
 	}
+	node := s.node
 	s.mu.RUnlock()
 	target.StartHeight = DefaultRescanStartHeightForHash(network, target.DisplayHash)
-	return target, nil
+	if target.StartHeight > 0 {
+		return target, nil
+	}
+	// Without a height every replayed transaction is stamped unconfirmed and
+	// the cursor never moves, so no catch-up would ever run again: the wallet
+	// would drift out of date with nothing to say so. The node indexes every
+	// header from the network checkpoint to the tip, so a hash on that stretch
+	// resolves on its own; anything else needs the height typed in.
+	if node != nil {
+		if hdr, ok := node.HeaderByHash(target.DisplayHash); ok && hdr.Height > 0 {
+			target.StartHeight = hdr.Height
+			return target, nil
+		}
+	}
+	return target, fmt.Errorf("start block height required: %s is not a block the node knows the height of", shortTxID(target.DisplayHash))
 }
 
 func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, error) {
@@ -90,14 +105,18 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 		s.mu.Unlock()
 	}()
 
-	var original []store.UTXORecord
+	var original preRebuildState
 	if rebuild {
 		s.mu.Lock()
 		if s.wallet == nil || s.payload == nil {
 			s.mu.Unlock()
 			return "", errors.New("wallet locked")
 		}
-		original = append([]store.UTXORecord(nil), s.payload.UTXOs...)
+		original = preRebuildState{
+			utxos:        append([]store.UTXORecord(nil), s.payload.UTXOs...),
+			syncedHash:   s.payload.SyncedHash,
+			syncedHeight: s.payload.SyncedHeight,
+		}
 		if _, err := s.wallet.Wipe(context.Background()); err != nil {
 			s.mu.Unlock()
 			return "", err
@@ -174,17 +193,27 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 		},
 	})
 	if err != nil {
-		// A stop is not a failure: the blocks replayed so far are real, and a
-		// rebuild's cleared UTXOs have been repopulated as far as the scan
-		// got. Tearing that back down would throw away the work.
-		if errors.Is(err, context.Canceled) || scanCtx.Err() != nil {
+		// Whether the scan was stopped or failed, the blocks it replayed are
+		// real wallet state, and the cursor already names them (checkpoints
+		// advance it every hundred blocks). Keep them: the next catch-up
+		// resumes from the cursor. A failed rebuild that replayed nothing is
+		// the one case where the wipe is the only thing that happened, and
+		// there the pre-rebuild set and cursor go back as they were. Putting
+		// the old set back after blocks were replayed would leave UTXOs from
+		// one height under a cursor from another.
+		if rebuild && (stats == nil || stats.BlocksFetched == 0) {
+			s.restoreUTXOsAfterRebuild(original, wallet)
+		} else {
 			s.recordScanProgress(wallet, runtime, stats)
-			msg := fmt.Sprintf("scan stopped: %d blocks, %d transactions", stats.BlocksFetched, stats.TxsReplayed)
+		}
+		if errors.Is(err, context.Canceled) || scanCtx.Err() != nil {
+			fetched, replayed := 0, 0
+			if stats != nil {
+				fetched, replayed = stats.BlocksFetched, stats.TxsReplayed
+			}
+			msg := fmt.Sprintf("scan stopped: %d blocks, %d transactions", fetched, replayed)
 			s.publish(EventStatus, msg)
 			return msg, nil
-		}
-		if rebuild {
-			s.restoreUTXOsAfterRebuild(original, wallet)
 		}
 		s.publish(EventError, err.Error())
 		return "", err
@@ -331,7 +360,16 @@ func displayBlockHash(hash [32]byte) string {
 	return hex.EncodeToString(out[:])
 }
 
-func (s *Service) restoreUTXOsAfterRebuild(original []store.UTXORecord, activeWallet *bsvsdk.Wallet) {
+// preRebuildState is what a rebuild rescan wipes: the UTXO set and the cursor
+// that described it. Restored together or not at all — a set from one height
+// under a cursor from another is a wrong balance with nothing to say so.
+type preRebuildState struct {
+	utxos        []store.UTXORecord
+	syncedHash   string
+	syncedHeight int32
+}
+
+func (s *Service) restoreUTXOsAfterRebuild(original preRebuildState, activeWallet *bsvsdk.Wallet) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.wallet != activeWallet {
@@ -341,12 +379,12 @@ func (s *Service) restoreUTXOsAfterRebuild(original []store.UTXORecord, activeWa
 	s.publishLocked(EventStatus, "restored pre-rebuild utxo set after rescan failure")
 }
 
-func (s *Service) restoreUTXOsLocked(original []store.UTXORecord) {
+func (s *Service) restoreUTXOsLocked(original preRebuildState) {
 	if s.wallet == nil || s.payload == nil {
 		return
 	}
 	s.wallet.ClearUTXOs()
-	for _, u := range original {
+	for _, u := range original.utxos {
 		script, err := hex.DecodeString(u.ScriptHex)
 		if err != nil {
 			s.publishLocked(EventError, fmt.Sprintf("restore utxo %s:%d decode: %v", u.TxID, u.Vout, err))
@@ -357,10 +395,23 @@ func (s *Service) restoreUTXOsLocked(original []store.UTXORecord) {
 			continue
 		}
 	}
-	s.payload.UTXOs = append([]store.UTXORecord(nil), original...)
+	s.payload.UTXOs = append([]store.UTXORecord(nil), original.utxos...)
+	s.restorePreRebuildCursorLocked(original)
 	if err := s.saveLocked(); err != nil {
 		s.publishLocked(EventError, "save after restore: "+err.Error())
 	}
+}
+
+// restorePreRebuildCursorLocked puts the cursor back where it was before a
+// rebuild rewound it. The UTXO set is the pre-rebuild one again, so the cursor
+// has to describe that set: this is the one place it moves backwards on
+// purpose.
+func (s *Service) restorePreRebuildCursorLocked(original preRebuildState) {
+	if s.payload == nil {
+		return
+	}
+	s.payload.SyncedHash = original.syncedHash
+	s.payload.SyncedHeight = original.syncedHeight
 }
 
 func DefaultRescanStartHash(network string) string {
