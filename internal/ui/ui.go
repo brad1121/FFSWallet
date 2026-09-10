@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -19,6 +20,7 @@ import (
 
 	walletapp "github.com/brad1121/FFSWallet/internal/app"
 	"github.com/brad1121/FFSWallet/internal/store"
+	"github.com/brad1121/FFSWallet/internal/update"
 )
 
 type UI struct {
@@ -46,18 +48,132 @@ type UI struct {
 	lastUTXOs  []store.UTXORecord
 	lastTxs    []store.TxRecord
 	closed     chan struct{}
+	// root is the window's only content: a fixed-minimum container the
+	// current screen is placed in. See fixedMinLayout.
+	root *fyne.Container
+	// screenHolder is where setContent puts the current screen; updateBanner
+	// sits above it on every screen and is hidden until a newer release is
+	// known.
+	screenHolder *fyne.Container
+	updateBanner *fyne.Container
+	updateLink   *widget.Hyperlink
+}
+
+// initialWindowSize is the size the window opens at. Every screen's minimum
+// size has to fit inside it: see the note in showMain.
+var initialWindowSize = fyne.NewSize(1040, 700)
+
+// rootMinSize is the one minimum size the window ever reports. See
+// fixedMinLayout.
+var rootMinSize = fyne.NewSize(480, 320)
+
+// fixedMinLayout lays out a single child to the full size and reports a
+// constant minimum size whatever the child says.
+//
+// Fyne re-requests the window size from the compositor every time the root
+// object's minimum size changes — even when the window is already large
+// enough, the request is for the size it already has. Under Sway that request
+// re-centres a floating window (see the note in showMain). A label whose text
+// changes length, a list that gains a row, a tab switch: each changed the
+// root's minimum and each snapped the window. With this at the root the
+// minimum never changes, so the request is never made. The children still
+// lay out against their own minimums; only the window stops hearing about it.
+type fixedMinLayout struct {
+	min fyne.Size
+}
+
+func (l *fixedMinLayout) MinSize(_ []fyne.CanvasObject) fyne.Size {
+	return l.min
+}
+
+func (l *fixedMinLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, o := range objects {
+		o.Resize(size)
+		o.Move(fyne.NewPos(0, 0))
+	}
+}
+
+// newUI wires the window with its fixed-minimum root. Screens are swapped in
+// with setContent; the window's own content is set exactly once, here.
+func newUI(svc *walletapp.Service, a fyne.App) *UI {
+	u := &UI{
+		svc:          svc,
+		app:          a,
+		closed:       make(chan struct{}),
+		eventSeen:    make(map[string]struct{}),
+		screenHolder: container.NewStack(),
+	}
+	u.updateLink = widget.NewHyperlink("", nil)
+	u.updateLink.Truncation = fyne.TextTruncateEllipsis
+	u.updateBanner = container.NewVBox(u.updateLink, widget.NewSeparator())
+	u.updateBanner.Hide()
+	u.root = container.New(&fixedMinLayout{min: rootMinSize},
+		container.NewBorder(u.updateBanner, nil, nil, nil, u.screenHolder))
+	u.win = a.NewWindow("FFSWallet")
+	u.win.SetContent(u.root)
+	return u
+}
+
+// setContent shows a screen. It swaps the holder's child rather than calling
+// Window.SetContent, which would re-request the window size on every screen
+// change (Fyne rescales on SetContent) and so re-centre the window.
+func (u *UI) setContent(screen fyne.CanvasObject) {
+	u.screenHolder.Objects = []fyne.CanvasObject{screen}
+	u.screenHolder.Refresh()
+}
+
+// screen returns the screen currently shown.
+func (u *UI) screen() fyne.CanvasObject {
+	if len(u.screenHolder.Objects) == 0 {
+		return nil
+	}
+	return u.screenHolder.Objects[0]
+}
+
+// checkForUpdate asks the release site, once, whether this build is behind.
+// A packaged release that is behind gets a banner on every screen and a line
+// in the event log; an unpackaged development build has no version to
+// compare, so it only logs what the latest release is. Failures are logged
+// and nothing else — the check must never get in the way of the wallet.
+func (u *UI) checkForUpdate(version string, release bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if !release || !update.IsReleaseVersion(version) {
+		latest, err := update.Checker{}.Latest(ctx)
+		if err != nil {
+			u.svc.Note(walletapp.EventStatus, "update check: "+err.Error())
+			return
+		}
+		u.svc.Note(walletapp.EventStatus, fmt.Sprintf("development build (%s); latest release is %s", version, latest.Tag))
+		return
+	}
+	res, err := update.Checker{}.Check(ctx, version)
+	if err != nil {
+		u.svc.Note(walletapp.EventStatus, "update check: "+err.Error())
+		return
+	}
+	if !res.Outdated {
+		u.svc.Note(walletapp.EventStatus, fmt.Sprintf("running %s, the latest release", res.Latest.Tag))
+		return
+	}
+	u.svc.Note(walletapp.EventStatus, fmt.Sprintf("update available: %s (running %s) %s", res.Latest.Tag, version, res.Latest.URL))
+	fyne.Do(func() { u.showUpdateBanner(version, res.Latest) })
+}
+
+// showUpdateBanner puts the update notice above the current screen.
+func (u *UI) showUpdateBanner(version string, latest update.Latest) {
+	u.updateLink.SetText(fmt.Sprintf("Update available: %s is out, you are running v%s. Click to open the release.", latest.Tag, version))
+	if target, err := url.Parse(latest.URL); err == nil {
+		u.updateLink.SetURL(target)
+	}
+	u.updateBanner.Show()
+	u.updateBanner.Refresh()
 }
 
 func Run(svc *walletapp.Service) {
 	a := fyneapp.NewWithID("com.ffswallet.desktop")
-	u := &UI{
-		svc:       svc,
-		app:       a,
-		closed:    make(chan struct{}),
-		eventSeen: make(map[string]struct{}),
-	}
-	u.win = a.NewWindow("FFSWallet")
-	u.win.Resize(fyne.NewSize(1040, 700))
+	u := newUI(svc, a)
+	u.win.Resize(initialWindowSize)
 	u.win.SetCloseIntercept(func() {
 		select {
 		case <-u.closed:
@@ -70,6 +186,8 @@ func Run(svc *walletapp.Service) {
 
 	u.showHome()
 	u.startLoops()
+	meta := a.Metadata()
+	go u.checkForUpdate(meta.Version, meta.Release)
 	u.win.ShowAndRun()
 }
 
@@ -112,7 +230,7 @@ func (u *UI) showHome() {
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
 
-	u.win.SetContent(container.NewBorder(
+	u.setContent(container.NewBorder(
 		container.NewVBox(title, sub, widget.NewSeparator()),
 		nil,
 		nil,
@@ -315,7 +433,7 @@ func (u *UI) showRescanChoice(network string) {
 		}()
 	}
 
-	u.win.SetContent(container.NewPadded(container.NewVBox(
+	u.setContent(container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("Seed wallet created", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		warning,
 		defaultLabel,
@@ -335,7 +453,7 @@ func (u *UI) showMnemonic(mnemonic string) {
 	continueButton := widget.NewButtonWithIcon("I saved seed", theme.ConfirmIcon(), func() {
 		u.showMain()
 	})
-	u.win.SetContent(container.NewPadded(container.NewVBox(
+	u.setContent(container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("Save mnemonic", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		widget.NewLabel("Seed is only shown now. Store offline before using wallet."),
 		seed,
@@ -372,7 +490,7 @@ func (u *UI) showUnlock() {
 	pass.OnSubmitted = func(string) {
 		unlock.OnTapped()
 	}
-	u.win.SetContent(container.NewPadded(container.NewVBox(
+	u.setContent(container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("FFSWallet", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		widget.NewLabelWithStyle("Unlock wallet", fyne.TextAlignCenter, fyne.TextStyle{}),
 		widget.NewLabel("Wallet: "+name),
@@ -386,13 +504,26 @@ func (u *UI) showUnlock() {
 }
 
 func (u *UI) showMain() {
+	// The window must never ask the compositor to grow. Sway re-centres a
+	// floating window on every size request a client makes, and Fyne makes
+	// one whenever the content's minimum size outgrows the window — so a
+	// label whose text gets longer, or a tab taller than the window, snaps a
+	// window the user has just moved back to the middle of the screen. Every
+	// label whose text changes at runtime truncates instead of widening, and
+	// every tab scrolls instead of growing. TestMainLayoutFitsInitialWindow
+	// holds the line.
 	u.balanceLabel = widget.NewLabel("")
+	u.balanceLabel.Truncation = fyne.TextTruncateEllipsis
 	u.networkLabel = widget.NewLabel("")
+	u.networkLabel.Truncation = fyne.TextTruncateEllipsis
 	u.peerLabel = widget.NewLabel("")
+	u.peerLabel.Truncation = fyne.TextTruncateEllipsis
 	u.heightLabel = widget.NewLabel("")
+	u.heightLabel.Truncation = fyne.TextTruncateEllipsis
 	u.addressLabel = widget.NewLabel("")
 	u.addressLabel.Wrapping = fyne.TextWrapBreak
 	u.statusLabel = widget.NewLabel("")
+	u.statusLabel.Truncation = fyne.TextTruncateEllipsis
 	u.addressBox = container.NewVBox()
 	u.utxoBox = container.NewVBox()
 	u.historyBox = container.NewVBox()
@@ -407,10 +538,10 @@ func (u *UI) showMain() {
 	}
 	u.setEventText(strings.Join(u.events, "\n"))
 
-	top := container.NewGridWithColumns(4,
-		u.balanceLabel,
-		u.networkLabel,
-		u.peerLabel,
+	// The height line carries the scan state and can run long, so it gets a
+	// row of its own rather than a quarter of one.
+	top := container.NewVBox(
+		container.NewGridWithColumns(3, u.balanceLabel, u.networkLabel, u.peerLabel),
 		u.heightLabel,
 	)
 	tabs := container.NewAppTabs(
@@ -423,7 +554,7 @@ func (u *UI) showMain() {
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
 
-	u.win.SetContent(container.NewBorder(top, u.statusLabel, nil, nil, tabs))
+	u.setContent(container.NewBorder(top, u.statusLabel, nil, nil, tabs))
 	u.refresh()
 }
 
@@ -570,6 +701,7 @@ func (u *UI) sendTab() fyne.CanvasObject {
 		widget.NewFormItem("Amount", amount),
 		widget.NewFormItem("Unit", unit),
 	)
+	result.Wrapping = fyne.TextWrapBreak
 	return container.NewVBox(form, container.NewHBox(send, sendAll), result)
 }
 
@@ -761,7 +893,7 @@ func (u *UI) settingsTab() fyne.CanvasObject {
 			})
 		}()
 	})
-	return container.NewVBox(
+	return container.NewVScroll(container.NewVBox(
 		widget.NewLabelWithStyle("Wallet name", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		name,
 		widget.NewSeparator(),
@@ -798,7 +930,7 @@ func (u *UI) settingsTab() fyne.CanvasObject {
 		rebroadcastStatus,
 		widget.NewSeparator(),
 		lock,
-	)
+	))
 }
 
 func (u *UI) refresh() {

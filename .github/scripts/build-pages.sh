@@ -20,6 +20,16 @@ cp "assets/home-screen.png" "$out_dir/home-screen.png"
 
 gh api "repos/$repo/releases?per_page=20" > "$releases_json"
 
+# latest.json is what the wallet reads at startup to tell whether it is
+# behind: keep the field names stable (internal/update in the wallet).
+jq '.[0] // {} | {
+  tag: (.tag_name // ""),
+  version: ((.tag_name // "") | ltrimstr("v")),
+  name: (.name // .tag_name // ""),
+  published_at: (.published_at // .created_at // ""),
+  url: (.html_url // "")
+}' "$releases_json" > "$out_dir/latest.json"
+
 cat > "$out_dir/styles.css" <<'EOF'
 :root {
   color-scheme: dark;

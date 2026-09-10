@@ -6,10 +6,12 @@ import (
 	"testing"
 	"time"
 
+	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/brad1121/FFSWallet/internal/app"
 	"github.com/brad1121/FFSWallet/internal/store"
+	"github.com/brad1121/FFSWallet/internal/update"
 )
 
 func TestParseAmount(t *testing.T) {
@@ -201,5 +203,104 @@ func TestFormatETABuckets(t *testing.T) {
 		if got := formatETA(c.d); got != c.want {
 			t.Fatalf("formatETA(%s): got %q want %q", c.d, got, c.want)
 		}
+	}
+}
+
+// TestMainLayoutFitsInitialWindow guards the window against asking to grow.
+// Sway re-centres a floating window on every size request a client makes, and
+// Fyne makes one whenever the content's minimum size exceeds the window. A
+// settings tab taller than the window, or a status line longer than it is
+// wide, therefore snaps a window the user has just moved back to the centre
+// of the screen. Every screen, with long runtime text in place, must fit.
+func TestMainLayoutFitsInitialWindow(t *testing.T) {
+	a := test.NewTempApp(t)
+	svc := app.NewService(t.TempDir())
+	u := newUI(svc, a)
+	defer u.win.Close()
+
+	check := func(screen string) {
+		t.Helper()
+		min := u.screen().MinSize()
+		if min.Width > initialWindowSize.Width || min.Height > initialWindowSize.Height {
+			t.Fatalf("%s: min size %.0fx%.0f exceeds the %.0fx%.0f window — the compositor would be asked to resize",
+				screen, min.Width, min.Height, initialWindowSize.Width, initialWindowSize.Height)
+		}
+	}
+
+	u.showHome()
+	check("home")
+	u.showUnlock()
+	check("unlock")
+	u.showRescanChoice(app.NetworkTestnet)
+	check("rescan choice")
+	u.showMnemonic(strings.Repeat("abandon ", 23) + "about")
+	check("mnemonic")
+
+	u.showMain()
+	// The text these labels carry at runtime, at its longest.
+	u.heightLabel.SetText(formatHeight(1757227, 1757227, 1715168, 0.4, "waiting for a block from the peer"))
+	u.balanceLabel.SetText("Balance: 21,000,000.00000000 BSV")
+	u.statusLabel.SetText("Wallet: " + strings.Repeat("w", 40) + " | Fee: 1000 sat/byte | Store: /" + strings.Repeat("directory/", 12) + "wallet.json")
+	u.addressLabel.SetText(strings.Repeat("m", 64))
+	for i := 0; i < 200; i++ {
+		u.addEvent(app.Event{Type: app.EventStatus, Message: strings.Repeat("rescan block peer=1.2.3.4:18333 ", 6)})
+	}
+	check("main")
+}
+
+// TestRootMinSizeNeverChanges: the window's root reports one minimum size no
+// matter what the screen inside it asks for. Fyne re-requests the window size
+// from the compositor whenever the root's minimum changes, and under Sway that
+// re-centres a floating window.
+func TestRootMinSizeNeverChanges(t *testing.T) {
+	a := test.NewTempApp(t)
+	u := newUI(app.NewService(t.TempDir()), a)
+	defer u.win.Close()
+
+	before := u.win.Content().MinSize()
+	if before != rootMinSize {
+		t.Fatalf("root min %v, want %v", before, rootMinSize)
+	}
+	u.showHome()
+	u.showMain()
+	u.heightLabel.SetText(strings.Repeat("Height: 1757291 · scanned to 1719168 (38123 behind) ", 4))
+	tall := widget.NewLabel(strings.Repeat("row\n", 200))
+	u.setContent(tall)
+	if tall.MinSize().Height <= rootMinSize.Height {
+		t.Fatal("test screen is not taller than the root minimum; the test proves nothing")
+	}
+	if after := u.win.Content().MinSize(); after != before {
+		t.Fatalf("root min changed from %v to %v — the window would ask the compositor to resize", before, after)
+	}
+}
+
+// TestUpdateBannerShowsOnEveryScreen: the notice sits above whichever screen
+// is current, hidden until a newer release is known, and survives a screen
+// change.
+func TestUpdateBannerShowsOnEveryScreen(t *testing.T) {
+	a := test.NewTempApp(t)
+	u := newUI(app.NewService(t.TempDir()), a)
+	defer u.win.Close()
+
+	u.showHome()
+	if u.updateBanner.Visible() {
+		t.Fatal("banner visible before any check")
+	}
+	u.showUpdateBanner("0.0.8", update.Latest{Tag: "v0.0.9", Version: "0.0.9", URL: "https://example.test/v0.0.9"})
+	if !u.updateBanner.Visible() {
+		t.Fatal("banner hidden after an outdated result")
+	}
+	if !strings.Contains(u.updateLink.Text, "v0.0.9") || !strings.Contains(u.updateLink.Text, "0.0.8") {
+		t.Fatalf("banner text %q names neither version", u.updateLink.Text)
+	}
+	if u.updateLink.URL == nil || u.updateLink.URL.String() != "https://example.test/v0.0.9" {
+		t.Fatalf("banner link %v, want the release page", u.updateLink.URL)
+	}
+	u.showMain()
+	if !u.updateBanner.Visible() {
+		t.Fatal("banner lost on screen change")
+	}
+	if min := u.win.Content().MinSize(); min != rootMinSize {
+		t.Fatalf("root min %v changed with the banner shown", min)
 	}
 }
