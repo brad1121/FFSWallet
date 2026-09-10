@@ -14,6 +14,7 @@ import (
 
 type Node = bsv.Node
 type Wallet = bsv.Wallet
+type TxState = bsv.TxState
 type Transaction = bsv.Transaction
 type OutputSpec = bsv.OutputSpec
 type SpendDetail = bsv.SpendDetail

@@ -153,14 +153,19 @@ func (s *Service) SendAll(to string) (string, error) {
 }
 
 func (s *Service) RebroadcastPending() (int, error) {
-	s.mu.RLock()
+	s.mu.Lock()
 	if s.node == nil || s.payload == nil {
-		s.mu.RUnlock()
+		s.mu.Unlock()
 		return 0, errors.New("wallet locked")
 	}
 	node := s.node
+	if s.syncPendingStatusLocked() {
+		if err := s.saveLocked(); err != nil {
+			s.publishLocked(EventError, err.Error())
+		}
+	}
 	stored := pendingRawTxs(s.payload.History)
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
 	if node.PeerCount() == 0 {
 		return 0, errors.New("rebroadcast: no connected peers")
@@ -190,6 +195,11 @@ func (s *Service) seedPendingFromHistory(node *bsvsdk.Node) {
 		return
 	}
 	s.pendingSeeded = true
+	if s.syncPendingStatusLocked() {
+		if err := s.saveLocked(); err != nil {
+			s.publishLocked(EventError, err.Error())
+		}
+	}
 	stored := pendingRawTxs(s.payload.History)
 	s.mu.Unlock()
 
@@ -212,6 +222,134 @@ func (s *Service) seedPendingFromHistory(node *bsvsdk.Node) {
 	if seeded > 0 {
 		s.publish(EventStatus, fmt.Sprintf("seeded %d pending tx(s) for relay", seeded))
 	}
+}
+
+// syncPendingStatusLocked brings the status of stored outgoing transactions
+// in line with what the wallet store knows. History only ever learned
+// "broadcast" and "seen", so a transaction that had long since confirmed, or
+// that lost to a confirmed double-spend, stayed pending forever — and every
+// unlock and every Rebroadcast pushed it to peers again. A confirmed
+// transaction becomes "confirmed" at its height; one the store has ruled out
+// becomes "conflicted". Both drop out of pendingRawTxs. Reports whether
+// anything changed so the caller can save.
+func (s *Service) syncPendingStatusLocked() bool {
+	if s.wallet == nil || s.payload == nil {
+		return false
+	}
+	states := make(map[string]bsvsdk.TxState)
+	for _, rec := range s.payload.History {
+		if rec.Direction != "out" || (rec.Status != "broadcast" && rec.Status != "seen") {
+			continue
+		}
+		if _, done := states[rec.TxID]; done {
+			continue
+		}
+		st, ok, err := s.wallet.TxState(rec.TxID)
+		if err != nil || !ok || (!st.Confirmed && !st.Conflicted) {
+			continue
+		}
+		states[rec.TxID] = st
+	}
+	changed := false
+	for i := range s.payload.History {
+		rec := &s.payload.History[i]
+		st, ok := states[rec.TxID]
+		if !ok {
+			continue
+		}
+		switch {
+		case st.Confirmed:
+			if rec.Status != "confirmed" || rec.Height != st.Height {
+				rec.Status = "confirmed"
+				rec.Height = st.Height
+				changed = true
+			}
+		case st.Conflicted:
+			if rec.Status != "conflicted" && rec.Status != "abandoned" {
+				rec.Status = "conflicted"
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// AbandonTransaction gives up on an outgoing transaction that has not
+// confirmed. The wallet marks it and everything built on it as dead, stops
+// announcing it, and returns the coins it spent to the balance.
+//
+// This exists because the network does not always say no. A conflict is
+// detected when a confirmed transaction takes one of our inputs, but a
+// transaction whose input simply does not exist — its parent was rejected
+// and forgotten, or never relayed — has no competitor. Peers hold it as an
+// orphan without a reject, it never confirms, and its change stands in the
+// balance until someone gives up on it. A confirmed transaction is refused.
+func (s *Service) AbandonTransaction(txID string) error {
+	txID = strings.ToLower(strings.TrimSpace(txID))
+	if txID == "" {
+		return errors.New("transaction id required")
+	}
+	// Hold the send lock too: a Send in flight may be building on the very
+	// coins this returns, and the two must not interleave.
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.wallet == nil || s.payload == nil {
+		return errors.New("wallet locked")
+	}
+	s.syncPendingStatusLocked()
+	// The transaction may be known only by the change it paid us — an
+	// outgoing record is lost when a rejected parent is discarded, and a
+	// stuck child of it then has only "in" rows. Any row will do; the store
+	// decides whether it is still pending.
+	var inputs int
+	found := false
+	for _, rec := range s.payload.History {
+		if !strings.EqualFold(rec.TxID, txID) {
+			continue
+		}
+		found = true
+		if !Abandonable(rec) {
+			return fmt.Errorf("transaction %s is %s; only a pending transaction can be abandoned", shortTxID(txID), rec.Status)
+		}
+		if rec.Direction == "out" {
+			inputs = len(rec.SpentInputs)
+		}
+	}
+	if !found {
+		return fmt.Errorf("transaction %s is not one of ours", shortTxID(txID))
+	}
+	if err := s.wallet.AbandonTransaction(txID); err != nil {
+		return err
+	}
+	for i := range s.payload.History {
+		if strings.EqualFold(s.payload.History[i].TxID, txID) {
+			s.payload.History[i].Status = "abandoned"
+		}
+	}
+	// Anything that spent this transaction's outputs is conflicted now.
+	s.syncPendingStatusLocked()
+	s.refreshUTXOsLocked()
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	s.publishLocked(EventStatus, fmt.Sprintf("abandoned tx=%s inputs=%d balance=%d sat", txID, inputs, s.wallet.Balance()))
+	return nil
+}
+
+// Abandonable reports whether a history row describes a transaction that is
+// still waiting on the network: an outgoing one that is broadcast or seen, or
+// an incoming one that has no height yet. Anything confirmed, conflicted or
+// already abandoned is not.
+func Abandonable(rec store.TxRecord) bool {
+	switch rec.Direction {
+	case "out":
+		return rec.Status == "broadcast" || rec.Status == "seen"
+	case "in":
+		return rec.Height < 0 && rec.Status == "seen"
+	}
+	return false
 }
 
 func (s *Service) markOutgoingRelayedLocked(txID string) bool {
@@ -287,12 +425,27 @@ const (
 // saw.
 func missingInputsReject(reason string) bool {
 	reason = strings.ToLower(reason)
-	for _, marker := range []string{"missing-inputs", "missing inputs", "missingorspent", "bad-txns-inputs"} {
+	for _, marker := range []string{"missing-inputs", "missing inputs", "missingorspent", "inputs-spent", "bad-txns-inputs"} {
 		if strings.Contains(reason, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// duplicateMeansRelayed decides what a RejectDuplicate (0x12) is telling us.
+// bitcoin-sv uses the same code for two different things: "txn-already-known"
+// and "txn-already-in-mempool", which mean the peer has the transaction — a
+// successful relay — and "bad-txns-inputs-spent", which means the coins it
+// spends are gone. Only the first is good news. A duplicate reject with no
+// reason is read as relayed: a reject is one peer's word, and discarding a
+// transaction on a guess is worse than keeping a doubtful one.
+func duplicateMeansRelayed(reason string) bool {
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	if reason == "" {
+		return true
+	}
+	return strings.Contains(reason, "already")
 }
 
 // handleReject reacts to a peer rejecting one of our own broadcasts. A reject
@@ -319,7 +472,7 @@ func (s *Service) handleReject(reject bsvsdk.Reject) {
 		s.mu.Unlock()
 		return
 	}
-	if reject.Code == rejectDuplicate {
+	if reject.Code == rejectDuplicate && duplicateMeansRelayed(reject.Reason) {
 		// The peer already has it: the broadcast worked.
 		if s.markOutgoingRelayedLocked(txID) {
 			if err := s.saveLocked(); err != nil {

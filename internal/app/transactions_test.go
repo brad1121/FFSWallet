@@ -42,6 +42,7 @@ func TestMissingInputsRejectRecognisesNodeReasons(t *testing.T) {
 		"bad-txns-inputs-missingorspent",
 		"Missing Inputs",
 		"bad-txns-inputs-duplicate",
+		"bad-txns-inputs-spent",
 	} {
 		if !missingInputsReject(reason) {
 			t.Fatalf("reason %q not recognised as a missing-inputs rejection", reason)
@@ -114,5 +115,39 @@ func TestDiscardRejectedRemovesHistory(t *testing.T) {
 	}
 	if len(svc.payload.History) != 1 || svc.payload.History[0].TxID != "cccc" {
 		t.Fatalf("history = %#v, want only the incoming record", svc.payload.History)
+	}
+}
+
+// TestDuplicateMeansRelayed pins the reading of bitcoin-sv's REJECT_DUPLICATE:
+// "already known" is a successful relay, "inputs spent" is not.
+func TestDuplicateMeansRelayed(t *testing.T) {
+	for _, reason := range []string{"txn-already-known", "txn-already-in-mempool", "Txn-Already-Known", ""} {
+		if !duplicateMeansRelayed(reason) {
+			t.Fatalf("reason %q should read as relayed", reason)
+		}
+	}
+	for _, reason := range []string{"bad-txns-inputs-spent", "bad-txns-inputs-missingorspent"} {
+		if duplicateMeansRelayed(reason) {
+			t.Fatalf("reason %q wrongly read as relayed", reason)
+		}
+	}
+}
+
+// TestHandleRejectDuplicateInputsSpentDiscards: a duplicate-coded reject that
+// says the inputs are spent is a real rejection, not evidence of relay.
+func TestHandleRejectDuplicateInputsSpentDiscards(t *testing.T) {
+	dir := t.TempDir()
+	svc := NewService(dir)
+	svc.path = dir + "/w.json"
+	svc.passphrase = "pw"
+	svc.payload = &store.Payload{
+		Network: NetworkTestnet,
+		History: []store.TxRecord{{TxID: "aaaa", Direction: "out", Status: "broadcast"}},
+	}
+
+	svc.handleReject(bsvsdk.Reject{Command: "tx", Hash: "aaaa", Code: rejectDuplicate, Reason: "bad-txns-inputs-spent"})
+
+	if len(svc.payload.History) != 0 {
+		t.Fatalf("inputs-spent reject kept the transaction: %#v", svc.payload.History)
 	}
 }

@@ -72,6 +72,33 @@ why a scan that died early left the wrong figure standing. Ingest now asks the
 store's spend index and conflict flag before adding (`storeKnowsSpentLocked`).
 Memory must mirror `AvailableCoins`; never let it drift.
 
+Two more with the same signature, found together when a wallet showed 2.5 BSV
+against 2.0 on chain:
+
+- **A conflict that did not reach later descendants.** `MarkConflicted`
+  cascades to the descendants a losing tx has *at that moment*. A tx built
+  afterwards on the loser's change was never flagged, its change counted as
+  balance, and the next send spent that — a chain of three phantom txs, each
+  spending the last. No block will ever rule on them: peers hold a tx whose
+  parent they do not know as an orphan and send no `reject`. Ingest now
+  inherits the conflict from any input's parent (`ProcessTransactionInBlock`,
+  the `deadTx` arm), and a tx the store already holds as conflicted spends
+  and creates nothing when relayed again.
+- **A tx with no competitor.** A tx whose input simply does not exist (its
+  parent was rejected and discarded, or never relayed) is never conflicted,
+  because nothing on chain contradicts it. Its change sits in the balance and
+  the real coin it "spent" is hidden, forever. Only a human can call it:
+  `Wallet.Abandon` / `Service.AbandonTransaction`, the History detail
+  dialog's "Abandon transaction" button. It marks the tx conflicted
+  (cascading), reloads memory from the store, and tells the node to forget it.
+
+Related: history status only ever learned `broadcast` and `seen`, so
+confirmed and conflicted txs stayed "pending" and were pushed to peers again
+on every unlock and every Rebroadcast — and re-ingested through `onTx` each
+time. `syncPendingStatusLocked` now reads the store first. And bitcoin-sv uses
+`REJECT_DUPLICATE` (0x12) for `bad-txns-inputs-spent` as well as
+`txn-already-known`; only the latter means relayed (`duplicateMeansRelayed`).
+
 Related height bugs with the same signature — wrong balance, no error:
 
 - Block heights were a running counter, so one failed block fetch shifted every

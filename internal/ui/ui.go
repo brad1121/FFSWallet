@@ -1132,7 +1132,29 @@ func (u *UI) showHistoryDetail(rec store.TxRecord) {
 	if link := whatsOnChainTxURL(snap.Network, rec.TxID); link != nil {
 		content = append(content, widget.NewHyperlink("Open transaction in WhatsOnChain", link))
 	}
-	dlg := dialog.NewCustom("Transaction details", "Close", container.NewVScroll(container.NewVBox(content...)), u.win)
+	var dlg dialog.Dialog
+	if walletapp.Abandonable(rec) {
+		abandon := widget.NewButtonWithIcon("Abandon transaction", theme.CancelIcon(), func() {
+			dialog.ShowConfirm("Abandon transaction",
+				"Give up on this transaction?\n\nThe wallet marks it, and anything built on it, as dead, stops announcing it, and returns the coins it spent to the balance. Use this for a transaction the network never picked up. It cannot pull back a transaction the network has already accepted.",
+				func(ok bool) {
+					if !ok {
+						return
+					}
+					if err := u.svc.AbandonTransaction(rec.TxID); err != nil {
+						dialog.ShowError(err, u.win)
+						return
+					}
+					u.refresh()
+					if dlg != nil {
+						dlg.Hide()
+					}
+				}, u.win)
+		})
+		abandon.Importance = widget.DangerImportance
+		content = append(content, abandon)
+	}
+	dlg = dialog.NewCustom("Transaction details", "Close", container.NewVScroll(container.NewVBox(content...)), u.win)
 	size := u.win.Canvas().Size()
 	dlg.Resize(fyne.NewSize(size.Width*0.8, size.Height*0.8))
 	dlg.Show()
