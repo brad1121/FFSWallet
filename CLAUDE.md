@@ -197,6 +197,29 @@ window's content is set once, to a root container with `fixedMinLayout`, whose
 `setContent`. `TestRootMinSizeNeverChanges` holds that line. Do not call
 `u.win.SetContent` from a screen.
 
+## Mobile
+
+Android and iOS are the same binary with `ui.UI.mobile` set. Things that were
+not obvious:
+
+- **`os.UserConfigDir` fails on Android** — Fyne does not set `$HOME` — and
+  the old `main` called `log.Fatal` on it, so the app died at launch.
+  `ui.DataDir` uses the app's sandbox (`Storage().RootURI()`) on mobile. The
+  Fyne app is therefore created before the service.
+- **A backgrounded phone app is a closed app.** The OS suspends it; peers
+  drop and nothing mined meanwhile is seen. `SetOnEnteredForeground` runs
+  `Service.ResumeCatchUp`, the same catch-up an unlock runs.
+- **`fyne package -os ios|iossimulator` cannot run in CI**: it reads a team
+  ID from an Apple certificate in the keychain even for the simulator.
+  `.github/scripts/build-ios-simulator.sh` does its work directly — the
+  Xcode project it generates only wraps the prebuilt Go executable.
+- **`fyne package --release -os android` makes an `.aab`** needing the
+  publisher's keystore. CI ships the non-release, debug-signed (and
+  debuggable) APK.
+- `TestMobileLayoutFitsPhone` holds every screen to a 360x640 portrait
+  screen. Labels whose text is fixed but long wrap (`wrappedLabel`); rows of
+  buttons go through `buttonRow`, which stacks them on a phone.
+
 ## Release
 
 Tag `vX.Y.Z` on `master`. The Release workflow packages Linux/macOS/Windows,

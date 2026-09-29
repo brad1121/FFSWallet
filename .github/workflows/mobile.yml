@@ -1,0 +1,242 @@
+name: Mobile
+
+# Builds the Android APK and the iOS Simulator app, then installs each on an
+# emulator / simulator and checks it is still running after launch. Release
+# calls this with workflow_call so the packages are attached to the release;
+# a push that touches the app builds and checks them without publishing.
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - "**.go"
+      - "go.mod"
+      - "go.sum"
+      - "assets/**"
+      - ".github/workflows/mobile.yml"
+      - ".github/scripts/build-ios-simulator.sh"
+      - ".github/scripts/smoke-*.sh"
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  SDK_MODULE: github.com/brad1121/bitcoinsv-sdk-go
+  SDK_REPO: git@github.com:brad1121/bitcoinsv-sdk-go.git
+  GOPRIVATE: github.com/brad1121/bitcoinsv-sdk-go
+  GONOSUMDB: github.com/brad1121/bitcoinsv-sdk-go
+  # Android package name and iOS bundle ID. An installed app is identified by
+  # it: changing it later makes the next build a different app, not an update.
+  APP_ID: com.ffswallet.mobile
+  BUNDLE_ID: com.ffswallet.mobile
+  # Pinned so a new packager release cannot change what gets built.
+  FYNE_TOOLS: fyne.io/tools/cmd/fyne@v1.7.2
+
+jobs:
+  android:
+    name: Build Android
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout wallet
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Configure SDK deploy key
+        shell: bash
+        env:
+          SSH_KEY_SDK: ${{ secrets.SSH_KEY_SDK }}
+        run: |
+          if [ -z "$SSH_KEY_SDK" ]; then
+            printf '%s\n' 'Missing SSH_KEY_SDK secret. Add read-only deploy key private half from SDK repo.'
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY_SDK" > ~/.ssh/id_sdk
+          chmod 600 ~/.ssh/id_sdk
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'EOF'
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/id_sdk
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+          EOF
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+      - name: Fetch private SDK
+        shell: bash
+        run: |
+          SDK_DIR="$RUNNER_TEMP/bitcoinsv-sdk-go"
+          git clone --depth 1 "$SDK_REPO" "$SDK_DIR"
+          go mod edit -replace "$SDK_MODULE=$SDK_DIR"
+          go mod download
+
+      - name: Package APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The runner image ships the NDK; fyne reads ANDROID_NDK_HOME.
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-}}"
+          if [ -z "$ANDROID_NDK_HOME" ] || [ ! -d "$ANDROID_NDK_HOME" ]; then
+            echo "Android NDK not found on runner" >&2
+            exit 1
+          fi
+          echo "NDK: $ANDROID_NDK_HOME"
+
+          app_version="0.0.0"
+          if [[ "${GITHUB_REF_NAME:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            app_version="${GITHUB_REF_NAME#v}"
+          fi
+
+          # Not --release: that produces a Play Store .aab that must be signed
+          # with the publisher's keystore. Without it fyne signs the APK with
+          # its debug key, which any device will sideload. Mobile builds do
+          # not take --src, so this runs from the main package.
+          root="$PWD"
+          (
+            cd cmd/ffswallet
+            go run "$FYNE_TOOLS" package \
+              --target android \
+              --name FFSWallet \
+              --icon "$root/assets/icon.png" \
+              --app-id "$APP_ID" \
+              --app-version "$app_version" \
+              --app-build "$GITHUB_RUN_NUMBER"
+          )
+
+          mkdir -p release
+          mv cmd/ffswallet/FFSWallet.apk release/FFSWallet-android.apk
+          ls -l release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFSWallet-android
+          path: release/FFSWallet-android.apk
+          if-no-files-found: error
+
+  android-smoke:
+    name: Launch on Android emulator
+    needs: android
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout wallet
+        uses: actions/checkout@v4
+
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: FFSWallet-android
+          path: apk
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Launch in emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash .github/scripts/smoke-android.sh apk/FFSWallet-android.apk smoke
+
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-android
+          path: smoke/
+          if-no-files-found: ignore
+
+  ios:
+    name: Build iOS Simulator and launch
+    runs-on: macos-latest
+    steps:
+      - name: Checkout wallet
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Configure SDK deploy key
+        shell: bash
+        env:
+          SSH_KEY_SDK: ${{ secrets.SSH_KEY_SDK }}
+        run: |
+          if [ -z "$SSH_KEY_SDK" ]; then
+            printf '%s\n' 'Missing SSH_KEY_SDK secret. Add read-only deploy key private half from SDK repo.'
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY_SDK" > ~/.ssh/id_sdk
+          chmod 600 ~/.ssh/id_sdk
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          cat > ~/.ssh/config <<'EOF'
+          Host github.com
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/id_sdk
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+          EOF
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+
+      - name: Fetch private SDK
+        shell: bash
+        run: |
+          SDK_DIR="$RUNNER_TEMP/bitcoinsv-sdk-go"
+          git clone --depth 1 "$SDK_REPO" "$SDK_DIR"
+          go mod edit -replace "$SDK_MODULE=$SDK_DIR"
+          go mod download
+
+      - name: Build simulator app
+        shell: bash
+        run: |
+          set -euo pipefail
+          export APP_VERSION="0.0.0"
+          if [[ "${GITHUB_REF_NAME:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            export APP_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          export APP_BUILD="$GITHUB_RUN_NUMBER"
+          bash .github/scripts/build-ios-simulator.sh build
+          mkdir -p release
+          ditto -c -k --keepParent build/FFSWallet.app "release/FFSWallet-ios-simulator-$(go env GOHOSTARCH).zip"
+          ls -l release
+
+      - name: Launch in simulator
+        shell: bash
+        run: bash .github/scripts/smoke-ios-simulator.sh build/FFSWallet.app smoke
+
+      - name: Upload simulator app
+        uses: actions/upload-artifact@v4
+        with:
+          name: FFSWallet-ios-simulator
+          path: release/*
+          if-no-files-found: error
+
+      - name: Upload smoke results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-ios
+          path: smoke/
+          if-no-files-found: ignore

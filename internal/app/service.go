@@ -146,6 +146,8 @@ func (s *Service) P2PTrafficEnabled() bool {
 }
 
 func (s *Service) WalletPath() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.path
 }
 
@@ -183,7 +185,7 @@ func (s *Service) SelectWallet(name string) error {
 }
 
 func (s *Service) WalletExists() bool {
-	return store.Exists(s.path)
+	return store.Exists(s.WalletPath())
 }
 
 func (s *Service) CreateWallet(name, passphrase, network string) (string, error) {
@@ -307,10 +309,11 @@ func (s *Service) Unlock(passphrase string) error {
 	if strings.TrimSpace(passphrase) == "" {
 		return errors.New("passphrase required")
 	}
-	if s.path == "" {
+	path := s.WalletPath()
+	if path == "" {
 		return errors.New("select wallet first")
 	}
-	payload, err := store.Load(s.path, passphrase)
+	payload, err := store.Load(path, passphrase)
 	if err != nil {
 		return err
 	}
@@ -457,6 +460,19 @@ func (s *Service) runCatchUp() {
 		s.publish(EventError, fmt.Sprintf("catch-up attempt %d failed, retrying in %s: %s", attempt, delay, err.Error()))
 		time.Sleep(delay)
 		delay *= 2
+	}
+}
+
+// ResumeCatchUp starts a catch-up if the wallet is unlocked and no scan is
+// already running. It is for a phone app coming back from the background:
+// while suspended it saw nothing, so the blocks mined meanwhile have to be
+// replayed just as they are after an unlock.
+func (s *Service) ResumeCatchUp() {
+	s.mu.RLock()
+	ready := s.wallet != nil && s.scanCancel == nil
+	s.mu.RUnlock()
+	if ready {
+		go s.runCatchUp()
 	}
 }
 

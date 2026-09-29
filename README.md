@@ -1,6 +1,6 @@
 # FFSWallet
 
-Desktop Bitcoin SV wallet written in Go.
+Bitcoin SV wallet written in Go, for desktop (Linux, macOS, Windows), Android and iOS.
 
 Seed-word imports can optionally rescan from a user-provided block hash. Default start point is the Chronicle checkpoint for supported networks.
 
@@ -43,6 +43,32 @@ go build -o bin/ffswallet ./cmd/ffswallet
 
 Local development can use ignored `go.work` to point at a local SDK checkout.
 Do not commit SDK source, `vendor/`, or local `replace` directives.
+
+## Mobile
+
+The same app builds for Android and iOS; on a phone the screens stack and the
+tabs sit at the bottom. Wallets live in the app's private storage rather than
+the user config directory, and returning to the app from the background runs
+a catch-up, since a suspended app saw nothing.
+
+The `Mobile` workflow builds both on every push that touches the app, and
+Release attaches them to each release:
+
+- `FFSWallet-android.apk`: universal APK (arm, arm64, x86, x86-64), signed with
+  the Fyne debug key so any device will sideload it. It is marked debuggable,
+  so treat it as a test build. A Play Store build needs your own keystore:
+  `fyne release --target android --key-store ... --key-name ...`, which
+  produces a signed `.aab`.
+- `FFSWallet-ios-simulator-arm64.zip`: an ad-hoc-signed app for the iOS
+  Simulator. Running on an iPhone needs an Apple Developer account: import the
+  signing certificate and provisioning profile on a Mac, then
+  `fyne release --target ios --certificate "Apple Distribution" --profile <name> --app-id com.ffswallet.mobile`.
+
+Each build is installed on an emulator / simulator in CI and must still be
+running after launch; the screenshots are kept as workflow artifacts.
+
+Locally, `go run -tags mobile ./cmd/ffswallet` runs the phone layout in a
+desktop window.
 
 ## Release
 

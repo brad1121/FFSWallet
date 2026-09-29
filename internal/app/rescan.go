@@ -151,6 +151,13 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 	deadline := time.Now().Add(time.Minute)
 	for node.PeerCount() == 0 {
 		if scanCtx.Err() != nil {
+			// Nothing was replayed, so a rebuild's wipe is the only thing
+			// that happened: put the old set and cursor back, as the
+			// no-peers timeout below does, rather than leave the wallet
+			// showing an empty balance until the next unlock.
+			if rebuild {
+				s.restoreUTXOsAfterRebuild(original, wallet)
+			}
 			return "", errScanStopped
 		}
 		if time.Now().After(deadline) {
