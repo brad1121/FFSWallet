@@ -3,9 +3,11 @@ package ui
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
@@ -302,5 +304,99 @@ func TestUpdateBannerShowsOnEveryScreen(t *testing.T) {
 	}
 	if min := u.win.Content().MinSize(); min != rootMinSize {
 		t.Fatalf("root min %v changed with the banner shown", min)
+	}
+}
+
+// phoneSize is a small portrait phone in Fyne units. A phone's window is the
+// whole screen and cannot grow, so a screen whose minimum is wider or taller
+// is cut off rather than resized.
+var phoneSize = fyne.NewSize(360, 640)
+
+// TestMobileLayoutFitsPhone: the same screens, laid out for a phone, fit a
+// small portrait screen with long runtime text in place.
+func TestMobileLayoutFitsPhone(t *testing.T) {
+	a := test.NewTempApp(t)
+	svc := app.NewService(t.TempDir())
+	u := newUI(svc, a)
+	u.mobile = true
+	defer u.win.Close()
+
+	check := func(screen string) {
+		t.Helper()
+		min := u.screen().MinSize()
+		if min.Width > phoneSize.Width || min.Height > phoneSize.Height {
+			t.Fatalf("%s: min size %.0fx%.0f exceeds a %.0fx%.0f phone screen",
+				screen, min.Width, min.Height, phoneSize.Width, phoneSize.Height)
+		}
+	}
+
+	u.showHome()
+	check("home")
+	u.showUnlock()
+	check("unlock")
+	u.showRescanChoice(app.NetworkTestnet)
+	check("rescan choice")
+	u.showMnemonic(strings.Repeat("abandon ", 23) + "about")
+	check("mnemonic")
+
+	u.showMain()
+	u.heightLabel.SetText(formatHeight(1757227, 1757227, 1715168, 0.4, "waiting for a block from the peer"))
+	u.balanceLabel.SetText("Balance: 21,000,000.00000000 BSV")
+	u.addressLabel.SetText(strings.Repeat("m", 64))
+	for i := 0; i < 200; i++ {
+		u.addEvent(app.Event{Type: app.EventStatus, Message: strings.Repeat("rescan block peer=1.2.3.4:18333 ", 6)})
+	}
+	check("main")
+}
+
+// lockedClipboard is a clipboard safe to share between goroutines. The test
+// driver runs fyne.Do inline on the calling goroutine, where the real driver
+// hands it to the main thread, so the clearing timer and the test would
+// otherwise race on the test driver's plain clipboard.
+type lockedClipboard struct {
+	mu      sync.Mutex
+	content string
+}
+
+func (c *lockedClipboard) Content() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.content
+}
+
+func (c *lockedClipboard) SetContent(content string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.content = content
+}
+
+// TestCopySecretClearsClipboard: a copied seed comes off the clipboard after
+// its time is up, but something the user copied since is left alone.
+func TestCopySecretClearsClipboard(t *testing.T) {
+	test.NewTempApp(t)
+	clip := &lockedClipboard{}
+
+	copySecret(clip, "seed words", 20*time.Millisecond)
+	if got := clip.Content(); got != "seed words" {
+		t.Fatalf("clipboard = %q right after copy", got)
+	}
+	waitFor(t, func() bool { return clip.Content() == "" })
+
+	copySecret(clip, "seed words", 20*time.Millisecond)
+	clip.SetContent("an address")
+	time.Sleep(100 * time.Millisecond)
+	if got := clip.Content(); got != "an address" {
+		t.Fatalf("clipboard = %q, want the later copy left in place", got)
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met in time")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

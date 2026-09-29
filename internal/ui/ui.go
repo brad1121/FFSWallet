@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -27,6 +28,10 @@ type UI struct {
 	svc *walletapp.Service
 	app fyne.App
 	win fyne.Window
+	// mobile is set on phones and tablets, where the window is the whole
+	// screen, portrait and narrow: screens stack what the desktop lays out
+	// side by side, and tabs sit at the bottom within reach of a thumb.
+	mobile bool
 
 	balanceLabel *widget.Label
 	networkLabel *widget.Label
@@ -99,6 +104,7 @@ func newUI(svc *walletapp.Service, a fyne.App) *UI {
 	u := &UI{
 		svc:          svc,
 		app:          a,
+		mobile:       fyne.CurrentDevice().IsMobile(),
 		closed:       make(chan struct{}),
 		eventSeen:    make(map[string]struct{}),
 		screenHolder: container.NewStack(),
@@ -170,8 +176,31 @@ func (u *UI) showUpdateBanner(version string, latest update.Latest) {
 	u.updateBanner.Refresh()
 }
 
-func Run(svc *walletapp.Service) {
-	a := fyneapp.NewWithID("com.ffswallet.desktop")
+// NewApp creates the Fyne application. It comes before the wallet service
+// because on a phone the app decides where the wallet may keep its files.
+func NewApp() fyne.App {
+	// The desktop keys its preferences directory on this ID, so it stays as
+	// it is. Mobile packages carry their own bundle ID (see the Mobile
+	// workflow); on a phone this one names nothing on disk.
+	return fyneapp.NewWithID("com.ffswallet.desktop")
+}
+
+// DataDir is where wallets live. On the desktop that is the user's config
+// directory, as it always has been. A phone has no such thing — Android does
+// not even set $HOME, so os.UserConfigDir fails there — and every app gets a
+// private sandbox instead, which Fyne exposes as its storage root.
+func DataDir(a fyne.App) (string, error) {
+	if fyne.CurrentDevice().IsMobile() {
+		root := a.Storage().RootURI()
+		if root == nil || root.Path() == "" {
+			return "", fmt.Errorf("app storage unavailable")
+		}
+		return filepath.Join(root.Path(), "FFSWallet"), nil
+	}
+	return store.DefaultDir()
+}
+
+func Run(a fyne.App, svc *walletapp.Service) {
 	u := newUI(svc, a)
 	u.win.Resize(initialWindowSize)
 	u.win.SetCloseIntercept(func() {
@@ -183,6 +212,14 @@ func Run(svc *walletapp.Service) {
 		u.svc.Close()
 		u.win.Close()
 	})
+
+	if u.mobile {
+		// A phone app is not running while it is in the background: the OS
+		// suspends it, and on the way back its peers are gone and anything
+		// mined meanwhile was never seen — exactly the state an unlock
+		// catches up from. So returning to the app catches up too.
+		a.Lifecycle().SetOnEnteredForeground(u.svc.ResumeCatchUp)
+	}
 
 	u.showHome()
 	u.startLoops()
@@ -221,7 +258,7 @@ func (u *UI) startLoops() {
 
 func (u *UI) showHome() {
 	title := widget.NewLabelWithStyle("FFSWallet", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	sub := widget.NewLabelWithStyle("Bitcoin SV desktop wallet", fyne.TextAlignCenter, fyne.TextStyle{})
+	sub := widget.NewLabelWithStyle("Bitcoin SV wallet", fyne.TextAlignCenter, fyne.TextStyle{})
 	wallets := u.walletList()
 
 	tabs := container.NewAppTabs(
@@ -235,7 +272,7 @@ func (u *UI) showHome() {
 		nil,
 		nil,
 		nil,
-		container.NewPadded(container.NewVBox(wallets, widget.NewSeparator(), tabs)),
+		container.NewVScroll(container.NewPadded(container.NewVBox(wallets, widget.NewSeparator(), tabs))),
 	))
 }
 
@@ -433,32 +470,63 @@ func (u *UI) showRescanChoice(network string) {
 		}()
 	}
 
-	u.setContent(container.NewPadded(container.NewVBox(
+	u.setContent(container.NewVScroll(container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("Seed wallet created", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		warning,
 		defaultLabel,
 		widget.NewForm(widget.NewFormItem("Start hash", startHash), widget.NewFormItem("Start height", startHeight)),
-		container.NewHBox(rescan, skip),
+		u.buttonRow(rescan, skip),
 		status,
-	)))
+	))))
 }
+
+// seedClipboardTTL is how long a copied seed stays on the clipboard. Long
+// enough to paste it somewhere safe; short enough that it is not still there
+// for the next app — or clipboard history, or a phone's cloud clipboard sync —
+// to pick up.
+const seedClipboardTTL = 60 * time.Second
 
 func (u *UI) showMnemonic(mnemonic string) {
 	seed := widget.NewMultiLineEntry()
 	seed.SetText(mnemonic)
+	seed.Wrapping = fyne.TextWrapWord
 	seed.SetMinRowsVisible(4)
 	copyButton := widget.NewButtonWithIcon("Copy seed", theme.ContentCopyIcon(), func() {
-		u.win.Clipboard().SetContent(mnemonic)
+		copySecret(u.app.Clipboard(), mnemonic, seedClipboardTTL)
 	})
 	continueButton := widget.NewButtonWithIcon("I saved seed", theme.ConfirmIcon(), func() {
 		u.showMain()
 	})
-	u.setContent(container.NewPadded(container.NewVBox(
+	note := widget.NewLabel("Seed is only shown now. Store offline before using wallet. A copied seed is cleared from the clipboard after a minute.")
+	note.Wrapping = fyne.TextWrapWord
+	u.setContent(container.NewVScroll(container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("Save mnemonic", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("Seed is only shown now. Store offline before using wallet."),
+		note,
 		seed,
-		container.NewHBox(copyButton, continueButton),
-	)))
+		u.buttonRow(copyButton, continueButton),
+	))))
+}
+
+// copySecret puts text on the clipboard and takes it off again after ttl,
+// unless something else has been copied since.
+func copySecret(clip fyne.Clipboard, text string, ttl time.Duration) {
+	clip.SetContent(text)
+	time.AfterFunc(ttl, func() {
+		fyne.Do(func() {
+			if clip.Content() == text {
+				clip.SetContent("")
+			}
+		})
+	})
+}
+
+// buttonRow lays buttons side by side on the desktop. On a phone a row of
+// them is wider than the screen, so they stack.
+func (u *UI) buttonRow(buttons ...fyne.CanvasObject) fyne.CanvasObject {
+	if u.mobile {
+		return container.NewVBox(buttons...)
+	}
+	return container.NewHBox(buttons...)
 }
 
 func (u *UI) showUnlock() {
@@ -490,7 +558,9 @@ func (u *UI) showUnlock() {
 	pass.OnSubmitted = func(string) {
 		unlock.OnTapped()
 	}
-	u.setContent(container.NewPadded(container.NewVBox(
+	path := widget.NewLabel(u.svc.WalletPath())
+	path.Wrapping = fyne.TextWrapBreak
+	u.setContent(container.NewVScroll(container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("FFSWallet", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		widget.NewLabelWithStyle("Unlock wallet", fyne.TextAlignCenter, fyne.TextStyle{}),
 		widget.NewLabel("Wallet: "+name),
@@ -499,8 +569,8 @@ func (u *UI) showUnlock() {
 		unlock,
 		status,
 		widget.NewSeparator(),
-		widget.NewLabel(u.svc.WalletPath()),
-	)))
+		path,
+	))))
 }
 
 func (u *UI) showMain() {
@@ -544,6 +614,18 @@ func (u *UI) showMain() {
 		container.NewGridWithColumns(3, u.balanceLabel, u.networkLabel, u.peerLabel),
 		u.heightLabel,
 	)
+	if u.mobile {
+		// A third of a phone's width cuts the balance to "Balance: 0.0…".
+		// It gets its own line; the height line wraps rather than hiding the
+		// scan state behind an ellipsis.
+		u.heightLabel.Truncation = fyne.TextTruncateOff
+		u.heightLabel.Wrapping = fyne.TextWrapWord
+		top = container.NewVBox(
+			u.balanceLabel,
+			container.NewGridWithColumns(2, u.networkLabel, u.peerLabel),
+			u.heightLabel,
+		)
+	}
 	tabs := container.NewAppTabs(
 		container.NewTabItemWithIcon("Dashboard", theme.HomeIcon(), u.dashboardTab()),
 		container.NewTabItemWithIcon("Receive", theme.ContentAddIcon(), u.receiveTab()),
@@ -553,8 +635,16 @@ func (u *UI) showMain() {
 		container.NewTabItemWithIcon("Settings", theme.SettingsIcon(), u.settingsTab()),
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
+	status := fyne.CanvasObject(u.statusLabel)
+	if u.mobile {
+		tabs.SetTabLocation(container.TabLocationBottom)
+		// The status line is the wallet name, fee and file path: all in
+		// Settings already, and the path means nothing on a phone. The
+		// bottom edge belongs to the tabs.
+		status = nil
+	}
 
-	u.setContent(container.NewBorder(top, u.statusLabel, nil, nil, tabs))
+	u.setContent(container.NewBorder(top, status, nil, nil, tabs))
 	u.refresh()
 }
 
@@ -589,7 +679,7 @@ func (u *UI) dashboardTab() fyne.CanvasObject {
 		container.NewVBox(
 			widget.NewLabelWithStyle("Current receive address", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			u.addressLabel,
-			container.NewHBox(newAddr, copyAddr),
+			u.buttonRow(newAddr, copyAddr),
 			widget.NewSeparator(),
 			eventsHeader,
 		),
@@ -702,17 +792,17 @@ func (u *UI) sendTab() fyne.CanvasObject {
 		widget.NewFormItem("Unit", unit),
 	)
 	result.Wrapping = fyne.TextWrapBreak
-	return container.NewVBox(form, container.NewHBox(send, sendAll), result)
+	return container.NewVScroll(container.NewVBox(form, u.buttonRow(send, sendAll), result))
 }
 
 func (u *UI) utxosTab() fyne.CanvasObject {
-	help := widget.NewLabel("Double-click a UTXO row for details and transaction link.")
+	help := widget.NewLabel(u.gesture() + " a UTXO row for details and transaction link.")
 	help.Wrapping = fyne.TextWrapWord
 	return container.NewBorder(container.NewVBox(help, widget.NewSeparator()), nil, nil, nil, container.NewVScroll(u.utxoBox))
 }
 
 func (u *UI) historyTab() fyne.CanvasObject {
-	help := widget.NewLabel("Double-click a history row for transaction details and transaction link.")
+	help := widget.NewLabel(u.gesture() + " a history row for transaction details and transaction link.")
 	help.Wrapping = fyne.TextWrapWord
 	return container.NewBorder(container.NewVBox(help, widget.NewSeparator()), nil, nil, nil, container.NewVScroll(u.historyBox))
 }
@@ -900,17 +990,17 @@ func (u *UI) settingsTab() fyne.CanvasObject {
 		widget.NewLabelWithStyle("Wallet file", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		path,
 		widget.NewSeparator(),
-		widget.NewLabel("Default network: testnet"),
-		widget.NewLabel("Storage: encrypted local file"),
+		wrappedLabel("Default network: testnet"),
+		wrappedLabel("Storage: encrypted local file"),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Transaction fee", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("Manual fee rate in satoshis per byte."),
+		wrappedLabel("Manual fee rate in satoshis per byte."),
 		feeEntry,
 		saveFee,
 		feeStatus,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Manual peer dial", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("Add a peer directly using host:port."),
+		wrappedLabel("Add a peer directly using host:port."),
 		peerAddr,
 		addPeer,
 		peerStatus,
@@ -921,16 +1011,24 @@ func (u *UI) settingsTab() fyne.CanvasObject {
 		rescanHeight,
 		rescanRebuild,
 		rescanRebuildHelp,
-		container.NewHBox(startRescan, stopScan),
+		u.buttonRow(startRescan, stopScan),
 		rescanStatus,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Pending transactions", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("Push stored broadcast transactions to connected peers again."),
+		wrappedLabel("Push stored broadcast transactions to connected peers again."),
 		rebroadcast,
 		rebroadcastStatus,
 		widget.NewSeparator(),
 		lock,
 	))
+}
+
+// gesture names the double-tap the way the platform does.
+func (u *UI) gesture() string {
+	if u.mobile {
+		return "Double-tap"
+	}
+	return "Double-click"
 }
 
 func (u *UI) refresh() {
@@ -1214,6 +1312,14 @@ func historyDetailJSON(rec store.TxRecord, utxos []store.UTXORecord) string {
 		return fmt.Sprintf("{\n  \"error\": %q\n}", err.Error())
 	}
 	return string(raw)
+}
+
+// wrappedLabel is a label that wraps at word breaks instead of setting a
+// minimum width as wide as its text.
+func wrappedLabel(text string) *widget.Label {
+	l := widget.NewLabel(text)
+	l.Wrapping = fyne.TextWrapWord
+	return l
 }
 
 func codeBlock(text string) fyne.CanvasObject {

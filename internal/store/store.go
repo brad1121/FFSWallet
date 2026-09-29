@@ -19,6 +19,14 @@ import (
 
 var ErrInvalidPassphrase = errors.New("invalid passphrase or corrupt wallet file")
 
+// Upper bounds on KDF parameters read from a wallet file. Far above what
+// DefaultKDF uses (64 MiB, 3 passes), far below what would exhaust a device.
+const (
+	maxKDFMemoryKB = 1024 * 1024
+	maxKDFTime     = 64
+	maxKDFKeyBytes = 64
+)
+
 func DefaultKDF() KDF {
 	return KDF{
 		Algorithm: "argon2id",
@@ -174,7 +182,8 @@ func SaveWithKDF(path, passphrase string, payload *Payload, kdf KDF) error {
 		return fmt.Errorf("create wallet dir: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	if err := writeFileSync(tmp, raw, 0o600); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write wallet tmp: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -182,7 +191,41 @@ func SaveWithKDF(path, passphrase string, payload *Payload, kdf KDF) error {
 		return fmt.Errorf("replace wallet file: %w", err)
 	}
 	_ = os.Chmod(path, 0o600)
+	// The rename is only durable once the directory entry is. Without this a
+	// power loss (or, on a phone, the OS killing the app) can leave the old
+	// name pointing nowhere. Not every platform can sync a directory, so a
+	// failure here is not an error: the data itself is already on disk.
+	syncDir(filepath.Dir(path))
 	return nil
+}
+
+// writeFileSync writes data and flushes it to stable storage before
+// returning. os.WriteFile does not sync, so a crash between the write and the
+// rename that follows could install a zero-length wallet file in place of a
+// good one — and the wallet file holds the only copy of the seed on disk.
+func writeFileSync(name string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 func encrypt(plain []byte, passphrase string, kdf KDF) (*EncryptedFile, error) {
@@ -259,6 +302,13 @@ func deriveKey(passphrase string, salt []byte, kdf KDF) ([]byte, error) {
 		return nil, fmt.Errorf("unsupported kdf %q", kdf.Algorithm)
 	}
 	if kdf.Time == 0 || kdf.MemoryKB == 0 || kdf.Threads == 0 || kdf.KeyBytes == 0 {
+		return nil, errors.New("invalid kdf parameters")
+	}
+	// The parameters come from the file, and Argon2 allocates MemoryKB up
+	// front: a damaged or tampered file must not be able to ask for more
+	// memory than any phone has and take the process down before the
+	// passphrase is even checked.
+	if kdf.MemoryKB > maxKDFMemoryKB || kdf.Time > maxKDFTime || kdf.KeyBytes > maxKDFKeyBytes {
 		return nil, errors.New("invalid kdf parameters")
 	}
 	return argon2.IDKey([]byte(passphrase), salt, kdf.Time, kdf.MemoryKB, kdf.Threads, kdf.KeyBytes), nil

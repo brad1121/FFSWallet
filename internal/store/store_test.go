@@ -1,9 +1,11 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -153,5 +155,64 @@ func TestPayloadEnsureDefaults(t *testing.T) {
 	}
 	if p.CreatedAt.IsZero() {
 		t.Fatal("created_at not defaulted")
+	}
+}
+
+// TestLoadRefusesOversizedKDF: the KDF parameters are read from the file
+// before the passphrase can be checked, and Argon2 allocates the memory they
+// name up front. A damaged file must fail cleanly, not exhaust the device.
+func TestLoadRefusesOversizedKDF(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wallet.json")
+	kdf := KDF{Algorithm: "argon2id", Time: 1, MemoryKB: 1024, Threads: 1, KeyBytes: 32}
+	if err := SaveWithKDF(path, "passphrase", DefaultPayload("test"), kdf); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file EncryptedFile
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []KDF{
+		{Algorithm: "argon2id", Time: 1, MemoryKB: 64 * 1024 * 1024, Threads: 1, KeyBytes: 32},
+		{Algorithm: "argon2id", Time: 1 << 20, MemoryKB: 1024, Threads: 1, KeyBytes: 32},
+		{Algorithm: "argon2id", Time: 1, MemoryKB: 1024, Threads: 1, KeyBytes: 1 << 30},
+	} {
+		file.KDF = bad
+		out, err := json.Marshal(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, out, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path, "passphrase"); err == nil || !strings.Contains(err.Error(), "invalid kdf parameters") {
+			t.Fatalf("kdf %+v: err = %v, want invalid kdf parameters", bad, err)
+		}
+	}
+}
+
+// TestSaveLeavesNoTempFile: a save writes a temp file, syncs it and renames
+// it over the wallet; nothing should be left beside the wallet afterwards.
+func TestSaveLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.json")
+	kdf := KDF{Algorithm: "argon2id", Time: 1, MemoryKB: 1024, Threads: 1, KeyBytes: 32}
+	for i := 0; i < 2; i++ {
+		if err := SaveWithKDF(path, "passphrase", DefaultPayload("test"), kdf); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "wallet.json" {
+		t.Fatalf("dir holds %v, want only wallet.json", entries)
+	}
+	if _, err := Load(path, "passphrase"); err != nil {
+		t.Fatal(err)
 	}
 }

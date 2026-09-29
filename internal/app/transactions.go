@@ -524,6 +524,20 @@ func (s *Service) discardRejectedLocked(rec store.TxRecord, reject bsvsdk.Reject
 	if s.wallet == nil {
 		return 0
 	}
+	// The store is the truth, so the undo has to happen there. Marking the
+	// transaction conflicted releases its inputs, drops its change, cascades
+	// to anything built on it, reloads memory from the store, and stops the
+	// node relaying it. Undoing it in memory alone left the store holding
+	// the spend as live, and the next LoadFromStore or ReloadFromStore —
+	// every unlock, every scan end — spent the coins again with no record
+	// of why. If the transaction later confirms after all, block replay
+	// clears the conflict.
+	err := s.wallet.AbandonTransaction(rec.TxID)
+	if err == nil {
+		s.refreshUTXOsLocked()
+		return len(rec.SpentInputs)
+	}
+	s.publishLocked(EventError, fmt.Sprintf("mark rejected tx %s in store: %v; restoring inputs in memory only", shortTxID(rec.TxID), err))
 	// Drop any change output the rejected transaction created: it does not
 	// exist, and leaving it would overstate the balance.
 	for _, u := range s.payload.UTXOs {
