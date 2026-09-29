@@ -228,9 +228,9 @@ func varIntSize(n int) int {
 		return 1
 	case n <= 0xffff:
 		return 3
-	case n <= 0xffffffff:
-		return 5
 	default:
-		return 9
+		// A 9-byte count would need more than 2^32 inputs, and on a 32-bit
+		// phone an int cannot even hold that many.
+		return 5
 	}
 }
