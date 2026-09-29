@@ -197,6 +197,16 @@ window's content is set once, to a root container with `fixedMinLayout`, whose
 `setContent`. `TestRootMinSizeNeverChanges` holds that line. Do not call
 `u.win.SetContent` from a screen.
 
+## Sending
+
+**The fee a send dialog shows is the fee the transaction pays.** The SDK
+prices a send from its input and output counts only (`internal/app/fee.go` mirrors the figures), so the wallet
+selects the coins itself, shows the fee, and hands the SDK exactly those
+coins (`SpendToOutputsDetailedFrom`) under the greedy selector — knapsack
+is randomised and could pick another subset. `TestPreviewFeeIsTheFeeCharged`
+checks the preview against what the SDK actually charged; if it fails
+after an SDK change, the constants in `fee.go` are stale.
+
 ## Mobile
 
 Android and iOS are the same binary with `ui.UI.mobile` set. Things that were
@@ -213,9 +223,14 @@ not obvious:
   ID from an Apple certificate in the keychain even for the simulator.
   `.github/scripts/build-ios-simulator.sh` does its work directly — the
   Xcode project it generates only wraps the prebuilt Go executable.
-- **`fyne package --release -os android` makes an `.aab`** needing the
-  publisher's keystore. CI ships the non-release, debug-signed (and
-  debuggable) APK.
+- **`fyne package --release -os android` makes an `.aab`, not an APK**, and
+  needs `bundletool` on the PATH to do it. The release APK is that bundle
+  turned into one universal APK by `bundletool build-apks --mode universal`,
+  signed with the key in the `ANDROID_KEYSTORE_*` secrets
+  (`.github/scripts/package-android.sh`). The version code comes from the tag
+  (`major*1e6 + minor*1e3 + patch`): Android only installs an update with a
+  higher one. Without the secrets the script builds fyne's debug-signed APK
+  for testing, and a tag refuses to.
 - `TestMobileLayoutFitsPhone` holds every screen to a 360x640 portrait
   screen. Labels whose text is fixed but long wrap (`wrappedLabel`); rows of
   buttons go through `buttonRow`, which stacks them on a phone.

@@ -54,11 +54,14 @@ a catch-up, since a suspended app saw nothing.
 The `Mobile` workflow builds both on every push that touches the app, and
 Release attaches them to each release:
 
-- `FFSWallet-android.apk`: universal APK (arm, arm64, x86, x86-64), signed with
-  the Fyne debug key so any device will sideload it. It is marked debuggable,
-  so treat it as a test build. A Play Store build needs your own keystore:
-  `fyne release --target android --key-store ... --key-name ...`, which
-  produces a signed `.aab`.
+- `FFSWallet-android.apk`: universal release APK (arm, arm64, x86, x86-64)
+  for sideloading, signed with the project's release key. Fyne builds a
+  non-debuggable app bundle and bundletool turns it into one signed APK
+  (`.github/scripts/package-android.sh`). The key lives in three repository
+  secrets: `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+  `ANDROID_KEY_ALIAS`. Every update must be signed with the same key, so keep
+  a backup of it. Without the secrets (a fork, say) CI builds a debug-signed
+  test APK instead, and a tagged release fails rather than publish one.
 - `FFSWallet-ios-simulator-arm64.zip`: an ad-hoc-signed app for the iOS
   Simulator. Running on an iPhone needs an Apple Developer account: import the
   signing certificate and provisioning profile on a Mac, then

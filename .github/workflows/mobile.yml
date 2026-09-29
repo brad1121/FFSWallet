@@ -16,6 +16,7 @@ on:
       - "assets/**"
       - ".github/workflows/mobile.yml"
       - ".github/scripts/build-ios-simulator.sh"
+      - ".github/scripts/package-android.sh"
       - ".github/scripts/smoke-*.sh"
   workflow_dispatch:
   workflow_call:
@@ -83,6 +84,14 @@ jobs:
 
       - name: Package APK
         shell: bash
+        env:
+          # Release signing key. Present, the APK is a signed release build;
+          # absent (a fork, say), a debug-signed test build — except on a
+          # tag, which fails rather than publish one.
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # The runner image ships the NDK; fyne reads ANDROID_NDK_HOME.
@@ -92,30 +101,7 @@ jobs:
             exit 1
           fi
           echo "NDK: $ANDROID_NDK_HOME"
-
-          app_version="0.0.0"
-          if [[ "${GITHUB_REF_NAME:-}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            app_version="${GITHUB_REF_NAME#v}"
-          fi
-
-          # Not --release: that produces a Play Store .aab that must be signed
-          # with the publisher's keystore. Without it fyne signs the APK with
-          # its debug key, which any device will sideload. Mobile builds do
-          # not take --src, so this runs from the main package.
-          root="$PWD"
-          (
-            cd cmd/ffswallet
-            go run "$FYNE_TOOLS" package \
-              --target android \
-              --name FFSWallet \
-              --icon "$root/assets/icon.png" \
-              --app-id "$APP_ID" \
-              --app-version "$app_version" \
-              --app-build "$GITHUB_RUN_NUMBER"
-          )
-
-          mkdir -p release
-          mv cmd/ffswallet/FFSWallet.apk release/FFSWallet-android.apk
+          bash .github/scripts/package-android.sh
           ls -l release
 
       - name: Upload APK
