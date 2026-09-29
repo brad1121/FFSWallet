@@ -730,15 +730,16 @@ func (u *UI) sendTab() fyne.CanvasObject {
 			dialog.ShowError(fmt.Errorf("destination address required"), u.win)
 			return
 		}
-		msg := fmt.Sprintf("Send %s to %s?", formatSats(sats), dest)
-		dialog.ShowConfirm("Confirm send", msg, func(ok bool) {
-			if !ok {
-				return
-			}
+		preview, err := u.svc.PreviewSend(dest, sats)
+		if err != nil {
+			dialog.ShowError(err, u.win)
+			return
+		}
+		u.confirmSend("Confirm send", preview, func() {
 			send.Disable()
 			result.SetText("Broadcasting...")
 			go func() {
-				txid, err := u.svc.Send(dest, sats)
+				txid, err := u.svc.Send(preview)
 				fyne.Do(func() {
 					send.Enable()
 					if err != nil {
@@ -752,7 +753,7 @@ func (u *UI) sendTab() fyne.CanvasObject {
 					u.refresh()
 				})
 			}()
-		}, u.win)
+		})
 	})
 
 	var sendAll *widget.Button
@@ -762,14 +763,16 @@ func (u *UI) sendTab() fyne.CanvasObject {
 			dialog.ShowError(fmt.Errorf("destination address required"), u.win)
 			return
 		}
-		dialog.ShowConfirm("Confirm sweep", "Send full wallet balance to destination?", func(ok bool) {
-			if !ok {
-				return
-			}
+		preview, err := u.svc.PreviewSendAll(dest)
+		if err != nil {
+			dialog.ShowError(err, u.win)
+			return
+		}
+		u.confirmSend("Confirm sending everything", preview, func() {
 			sendAll.Disable()
 			result.SetText("Broadcasting sweep...")
 			go func() {
-				txid, err := u.svc.SendAll(dest)
+				txid, err := u.svc.SendAll(preview)
 				fyne.Do(func() {
 					sendAll.Enable()
 					if err != nil {
@@ -783,7 +786,7 @@ func (u *UI) sendTab() fyne.CanvasObject {
 					u.refresh()
 				})
 			}()
-		}, u.win)
+		})
 	})
 
 	form := widget.NewForm(
@@ -793,6 +796,37 @@ func (u *UI) sendTab() fyne.CanvasObject {
 	)
 	result.Wrapping = fyne.TextWrapBreak
 	return container.NewVScroll(container.NewVBox(form, u.buttonRow(send, sendAll), result))
+}
+
+// confirmSend asks the user to accept a send as it will actually be made:
+// what the destination receives, the network fee, and the total leaving the
+// wallet. The fee is exact — the send is refused if it would change.
+func (u *UI) confirmSend(title string, p walletapp.SendPreview, onConfirm func()) {
+	dialog.ShowCustomConfirm(title, "Send", "Cancel", sendSummary(p), func(ok bool) {
+		if ok {
+			onConfirm()
+		}
+	}, u.win)
+}
+
+func sendSummary(p walletapp.SendPreview) fyne.CanvasObject {
+	to := widget.NewLabel(p.To)
+	to.Wrapping = fyne.TextWrapBreak
+	inputs := fmt.Sprintf("%d coin", p.Inputs)
+	if p.Inputs != 1 {
+		inputs += "s"
+	}
+	items := []*widget.FormItem{
+		widget.NewFormItem("To", to),
+		widget.NewFormItem("Amount", widget.NewLabel(formatSats(p.Amount))),
+		widget.NewFormItem("Network fee", widget.NewLabel(formatSats(p.Fee))),
+		widget.NewFormItem("Total", widget.NewLabelWithStyle(formatSats(p.Total()), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})),
+		widget.NewFormItem("Spends", widget.NewLabel(inputs)),
+	}
+	if p.Change > 0 {
+		items = append(items, widget.NewFormItem("Change back", widget.NewLabel(formatSats(p.Change))))
+	}
+	return widget.NewForm(items...)
 }
 
 func (u *UI) utxosTab() fyne.CanvasObject {

@@ -11,8 +11,14 @@ import (
 	"github.com/brad1121/FFSWallet/internal/store"
 )
 
-func (s *Service) Send(to string, satoshis int64) (string, error) {
-	to = strings.TrimSpace(to)
+// Send broadcasts the send the user accepted. The coins are selected again
+// under the send lock; if the wallet's coins changed since the preview and
+// the send would now pay a different fee, nothing is sent and ErrFeeChanged
+// asks for a fresh confirmation. Otherwise the SDK is handed exactly the
+// previewed coins, so the fee paid is the fee shown.
+func (s *Service) Send(accepted SendPreview) (string, error) {
+	to := strings.TrimSpace(accepted.To)
+	satoshis := accepted.Amount
 	if to == "" {
 		return "", errors.New("destination address required")
 	}
@@ -27,16 +33,16 @@ func (s *Service) Send(to string, satoshis int64) (string, error) {
 	wallet := s.wallet
 	node := s.node
 	runtime := s.runtime
-	feePerByte := int64(0)
-	if s.payload != nil {
-		feePerByte = s.payload.FeePerByte
-	}
 	s.mu.RUnlock()
 	if wallet == nil || node == nil {
 		return "", errors.New("wallet locked")
 	}
-	if err := wallet.CanCover(satoshis, feePerByte, 1); err != nil {
+	current, err := s.PreviewSend(to, satoshis)
+	if err != nil {
 		return "", err
+	}
+	if !samePreview(current, accepted) {
+		return "", ErrFeeChanged
 	}
 	out, err := node.P2PKHOutput(to, satoshis)
 	if err != nil {
@@ -44,7 +50,7 @@ func (s *Service) Send(to string, satoshis int64) (string, error) {
 	}
 
 	changeIndex := wallet.NextIndex(1)
-	detail, err := wallet.SpendToOutputsDetailed([]bsvsdk.OutputSpec{out})
+	detail, err := wallet.SpendToOutputsDetailedFrom(current.outpoints, []bsvsdk.OutputSpec{out})
 	if err != nil {
 		s.mu.Lock()
 		if s.wallet == wallet {
@@ -100,8 +106,10 @@ func (s *Service) Send(to string, satoshis int64) (string, error) {
 	return detail.TxID, nil
 }
 
-func (s *Service) SendAll(to string) (string, error) {
-	to = strings.TrimSpace(to)
+// SendAll sweeps every spendable coin to the accepted preview's destination,
+// refusing with ErrFeeChanged if the coins changed since it was shown.
+func (s *Service) SendAll(accepted SendPreview) (string, error) {
+	to := strings.TrimSpace(accepted.To)
 	if to == "" {
 		return "", errors.New("destination address required")
 	}
@@ -116,7 +124,14 @@ func (s *Service) SendAll(to string) (string, error) {
 	if wallet == nil || node == nil {
 		return "", errors.New("wallet locked")
 	}
-	before := wallet.Balance()
+	current, err := s.PreviewSendAll(to)
+	if err != nil {
+		return "", err
+	}
+	if !samePreview(current, accepted) {
+		return "", ErrFeeChanged
+	}
+	before := current.Total()
 	detail, err := wallet.SendAllDetailed(to)
 	if err != nil {
 		s.mu.Lock()
@@ -148,7 +163,7 @@ func (s *Service) SendAll(to string) (string, error) {
 	if err := s.saveLocked(); err != nil {
 		return "", err
 	}
-	s.publishLocked(EventSend, fmt.Sprintf("broadcast sweep tx=%s amount=%d sat to=%s peers=%d relay=inv+tx", detail.TxID, before, to, node.PeerCount()))
+	s.publishLocked(EventSend, fmt.Sprintf("broadcast sweep tx=%s amount=%d sat to=%s fee=%d sat inputs=%d peers=%d relay=inv+tx", detail.TxID, current.Amount, to, current.Fee, len(detail.SpentUTXOs), node.PeerCount()))
 	return detail.TxID, nil
 }
 
@@ -361,6 +376,20 @@ func (s *Service) markOutgoingRelayedLocked(txID string) bool {
 		}
 	}
 	return changed
+}
+
+// samePreview reports whether two previews describe the same transaction:
+// same destination, amount, fee and coins.
+func samePreview(a, b SendPreview) bool {
+	if a.To != b.To || a.Amount != b.Amount || a.Fee != b.Fee || a.Change != b.Change || a.Sweep != b.Sweep || len(a.outpoints) != len(b.outpoints) {
+		return false
+	}
+	for i := range a.outpoints {
+		if a.outpoints[i] != b.outpoints[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func spentInputs(utxos []bsvsdk.UTXO) []store.SpentInput {

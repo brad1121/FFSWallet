@@ -150,20 +150,26 @@ func TestServiceApplyUTXOSnapshotPreservesSeenAt(t *testing.T) {
 
 func TestServicePublicErrorPathsWithoutRuntime(t *testing.T) {
 	svc := NewService(t.TempDir())
-	if _, err := svc.Send("", 1); err == nil {
+	if _, err := svc.Send(SendPreview{Amount: 1}); err == nil {
 		t.Fatal("expected empty send destination error")
 	}
-	if _, err := svc.Send("addr", 0); err == nil {
+	if _, err := svc.Send(SendPreview{To: "addr"}); err == nil {
 		t.Fatal("expected invalid send amount error")
 	}
-	if _, err := svc.Send("addr", 1); err == nil || err.Error() != "wallet locked" {
+	if _, err := svc.Send(SendPreview{To: "addr", Amount: 1}); err == nil || err.Error() != "wallet locked" {
 		t.Fatalf("send locked error: %v", err)
 	}
-	if _, err := svc.SendAll(""); err == nil {
+	if _, err := svc.PreviewSend("addr", 1); err == nil || err.Error() != "wallet locked" {
+		t.Fatalf("preview locked error: %v", err)
+	}
+	if _, err := svc.SendAll(SendPreview{}); err == nil {
 		t.Fatal("expected empty sweep destination error")
 	}
-	if _, err := svc.SendAll("addr"); err == nil || err.Error() != "wallet locked" {
+	if _, err := svc.SendAll(SendPreview{To: "addr"}); err == nil || err.Error() != "wallet locked" {
 		t.Fatalf("sweep locked error: %v", err)
+	}
+	if _, err := svc.PreviewSendAll("addr"); err == nil || err.Error() != "wallet locked" {
+		t.Fatalf("sweep preview locked error: %v", err)
 	}
 	if _, err := svc.RebroadcastPending(); err == nil || err.Error() != "wallet locked" {
 		t.Fatalf("rebroadcast locked error: %v", err)

@@ -400,3 +400,30 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// TestSendSummaryShowsFee: the confirmation names the network fee and the
+// total leaving the wallet, not just the amount, and fits a phone.
+func TestSendSummaryShowsFee(t *testing.T) {
+	test.NewTempApp(t)
+	p := app.SendPreview{To: strings.Repeat("m", 34), Amount: 10_000, Fee: 226, Change: 89_774, Inputs: 1}
+	form := sendSummary(p).(*widget.Form)
+	got := map[string]string{}
+	for _, item := range form.Items {
+		if l, ok := item.Widget.(*widget.Label); ok {
+			got[item.Text] = l.Text
+		}
+	}
+	for label, want := range map[string]string{
+		"Network fee": formatSats(226),
+		"Total":       formatSats(10_226),
+		"Amount":      formatSats(10_000),
+		"Change back": formatSats(89_774),
+	} {
+		if got[label] != want {
+			t.Fatalf("%s = %q, want %q (summary %v)", label, got[label], want, got)
+		}
+	}
+	if min := form.MinSize(); min.Width > phoneSize.Width-40 {
+		t.Fatalf("summary is %.0f wide; it will not fit a dialog on a %.0f-wide phone", min.Width, phoneSize.Width)
+	}
+}

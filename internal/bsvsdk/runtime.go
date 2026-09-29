@@ -27,6 +27,14 @@ type RescanOptions = bsv.RescanOptions
 type RescanProgress = bsv.RescanProgress
 type RescanStats = bsv.RescanStats
 type BlockHeaderInfo = bsv.BlockHeaderInfo
+type OutPoint = bsv.OutPoint
+
+// CoinbaseMaturity is how many confirmations a mining reward needs, counting
+// its own block, before it can be spent.
+const CoinbaseMaturity = bsv.CoinbaseMaturity
+
+// TxIDFromHex parses a display-order txid into internal byte order.
+func TxIDFromHex(txid string) ([32]byte, error) { return bsv.TxIDFromHex(txid) }
 
 type RuntimeConfig struct {
 	WalletName   string
@@ -156,7 +164,13 @@ func configureWallet(wallet *Wallet, store *sqlite.Store) {
 	if store != nil {
 		wallet.SetStore(store)
 	}
-	wallet.SetSelector(bsv.SelectorKnapsack)
+	// The wallet chooses a send's inputs itself, so it can show the fee
+	// before anything is signed, and hands the SDK exactly those. Greedy
+	// over a named set that already covers the send, in the same order,
+	// spends all of it and charges the same fee. Knapsack is randomised
+	// and may pick a different subset — a different fee from the one the
+	// user agreed to.
+	wallet.SetSelector(bsv.SelectorGreedy)
 }
 
 func openStore(ctx context.Context, path string) (*sqlite.Store, error) {
