@@ -223,14 +223,17 @@ not obvious:
   ID from an Apple certificate in the keychain even for the simulator.
   `.github/scripts/build-ios-simulator.sh` does its work directly — the
   Xcode project it generates only wraps the prebuilt Go executable.
-- **`fyne package --release -os android` makes an `.aab`, not an APK**, and
-  needs `bundletool` on the PATH to do it. The release APK is that bundle
-  turned into one universal APK by `bundletool build-apks --mode universal`,
-  signed with the key in the `ANDROID_KEYSTORE_*` secrets
-  (`.github/scripts/package-android.sh`). The version code comes from the tag
-  (`major*1e6 + minor*1e3 + patch`): Android only installs an update with a
-  higher one. Without the secrets the script builds fyne's debug-signed APK
-  for testing, and a tag refuses to.
+- **`fyne package --release -os android` is still a debuggable APK.** The
+  Android build takes its release manifest and its `.aab` output from the
+  `distribution` flag, which only `fyne release` sets. `fyne release` makes
+  the non-debuggable bundle and jarsigns it (its `--key-pass` writes the
+  store password, so the key shares it), and needs `bundletool` on the
+  PATH. The release APK is that bundle turned into one universal APK by
+  `bundletool build-apks --mode universal`, signed with the key in the
+  `ANDROID_KEYSTORE_*` secrets (`.github/scripts/package-android.sh`). The
+  version code comes from the tag (`major*1e6 + minor*1e3 + patch`): Android
+  only installs an update with a higher one. Without the secrets the script
+  builds fyne's debug-signed APK for testing, and a tag refuses to.
 - `TestMobileLayoutFitsPhone` holds every screen to a 360x640 portrait
   screen. Labels whose text is fixed but long wrap (`wrappedLabel`); rows of
   buttons go through `buttonRow`, which stacks them on a phone.

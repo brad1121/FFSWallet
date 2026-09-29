@@ -63,14 +63,26 @@ printf '#!/bin/sh\nexec java -jar "%s" "$@"\n' "$jar" > "$tmp/bin/bundletool"
 chmod +x "$tmp/bin/bundletool"
 export PATH="$tmp/bin:$PATH"
 
-go run "$FYNE_TOOLS" package \
-  --release \
+# `fyne release`, not `fyne package --release`: the Android build takes its
+# release manifest (not debuggable) and its .aab output from the
+# distribution flag, which only `release` sets — `package --release` quietly
+# makes a debuggable APK. `release` also signs the bundle with jarsigner.
+# (Its --key-pass flag writes the store password, so the key must share it,
+# which a PKCS12 keystore does.)
+if [ -n "${JAVA_HOME:-}" ]; then
+  export PATH="$JAVA_HOME/bin:$PATH"
+fi
+go run "$FYNE_TOOLS" release \
   --target android \
   --name FFSWallet \
   --icon "$root/assets/icon.png" \
   --app-id "$APP_ID" \
   --app-version "$app_version" \
-  --app-build "$version_code"
+  --app-build "$version_code" \
+  --key-store "$keystore" \
+  --key-store-pass "$ANDROID_KEYSTORE_PASSWORD" \
+  --key-name "$ANDROID_KEY_ALIAS"
+ls -l FFSWallet.aab
 
 bundletool build-apks \
   --bundle FFSWallet.aab \
