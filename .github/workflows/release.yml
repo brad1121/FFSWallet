@@ -11,6 +11,8 @@ permissions:
   id-token: write
 
 env:
+  # Pinned: @latest moved to v1.7.3, whose Windows packaging fails with
+  # "rename FFSWallet.exe FFSWallet.exe". v0.0.10 built with v1.7.2.
   SDK_MODULE: github.com/brad1121/bitcoinsv-sdk-go
   SDK_REPO: git@github.com:brad1121/bitcoinsv-sdk-go.git
   GOPRIVATE: github.com/brad1121/bitcoinsv-sdk-go
@@ -127,7 +129,7 @@ jobs:
             if command -v cygpath >/dev/null 2>&1; then
               win_exe="$(cygpath -m "$win_exe")"
             fi
-            go run fyne.io/tools/cmd/fyne@latest package \
+            go run fyne.io/tools/cmd/fyne@v1.7.2 package \
               --target "${{ matrix.target }}" \
               --name FFSWallet \
               --icon "$icon" \
@@ -137,7 +139,7 @@ jobs:
               --src ./cmd/ffswallet \
               --executable "$win_exe"
           else
-            go run fyne.io/tools/cmd/fyne@latest package \
+            go run fyne.io/tools/cmd/fyne@v1.7.2 package \
               --target "${{ matrix.target }}" \
               --name FFSWallet \
               --icon "$icon" \
