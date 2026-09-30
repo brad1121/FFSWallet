@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the public downloads site from published GitHub releases.
 #
-# Output: <out_dir>/index.html, styles.css, latest.json, home-screen.png and
+# Output: <out_dir>/index.html, support.html, styles.css, latest.json, home-screen.png and
 # downloads/<tag>/<asset> for every release. latest.json is read by the wallet
 # at startup (internal/update); keep its field names stable.
 set -euo pipefail
@@ -419,6 +419,27 @@ details.release > summary .date { margin-left: auto; font-family: var(--mono); f
 details.release > .assets { margin-left: 1.1em; margin-bottom: 18px; }
 details.release > .aux { margin-left: 1.1em; margin-bottom: 18px; }
 
+/* Support page */
+.support-link { margin-left: auto; }
+.support-link a { color: var(--signal); font-weight: 500; }
+.meter { margin: 8px 0 28px; max-width: 72ch; }
+.meter-track { height: 22px; border: 2px solid var(--rule); background: var(--field-2); }
+.meter-fill { height: 100%; background: var(--signal); }
+.meter-read { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 2em; margin-top: 8px; font-family: var(--mono); font-size: 14px; font-variant-numeric: tabular-nums; }
+.meter-read b { font-weight: 500; color: var(--signal); }
+.donate {
+  display: inline-block;
+  margin: 8px 0 12px;
+  padding: 14px 28px;
+  background: var(--ink);
+  color: var(--field);
+  font-weight: 700;
+  font-stretch: 90%;
+  font-size: 18px;
+  text-decoration: none;
+}
+.donate:hover { background: var(--signal); color: #fff; }
+
 @media (max-width: 720px) {
   body { font-size: 16px; }
   .asset, .assets.compact .asset {
@@ -556,10 +577,10 @@ cat <<HTML
 <header class="bar bar-top">
 HTML
 if [ -n "$latest_tag" ]; then
-  printf '  <span>Release: <b>%s</b></span><span>Published: <b>%s</b></span><span>Files: <b>%s</b></span><span>Network: <b>Testnet</b></span><span>Platforms: <b>Linux · macOS · Windows</b></span>\n' \
+  printf '  <span>Release: <b>%s</b></span><span>Published: <b>%s</b></span><span>Files: <b>%s</b></span><span>Network: <b>Testnet</b></span><span>Platforms: <b>Linux · macOS · Windows</b></span><span class="support-link"><a href="support.html">Support FFSWallet</a></span>\n' \
     "$(html_escape "$latest_tag")" "$(html_escape "$latest_date")" "$latest_files"
 else
-  printf '  <span>Release: <b>none yet</b></span><span>Network: <b>Testnet</b></span>\n'
+  printf '  <span>Release: <b>none yet</b></span><span>Network: <b>Testnet</b></span><span class="support-link"><a href="support.html">Support FFSWallet</a></span>\n'
 fi
 cat <<'HTML'
 </header>
@@ -663,7 +684,7 @@ cat <<HTML
 </section>
 
 <footer class="bar bar-bottom">
-  <span>Release: <b>$(html_escape "${latest_tag:-none}")</b></span><span>Generated: <b>$generated</b></span><span>Store: <b>downloads/</b>, the release artifacts byte for byte</span>
+  <span>Release: <b>$(html_escape "${latest_tag:-none}")</b></span><span>Generated: <b>$generated</b></span><span>Store: <b>downloads/</b>, the release artifacts byte for byte</span><span><a href="support.html">Support FFSWallet</a></span>
 </footer>
 
 </div>
@@ -671,5 +692,78 @@ cat <<HTML
 </html>
 HTML
 } > "$out_dir/index.html"
+
+# ── Support page ─────────────────────────────────────────────────────────────
+# The donation total is not read from PayPal (a static site has no way to ask
+# without credentials). It is .github/support/donations.json, edited by hand.
+goal_usd="$(jq -r '.goal_usd // 99' .github/support/donations.json)"
+raised_usd="$(jq -r '.raised_usd // 0' .github/support/donations.json)"
+raised_on="$(jq -r '.updated // ""' .github/support/donations.json)"
+pct="$(awk -v r="$raised_usd" -v g="$goal_usd" 'BEGIN { p = (g > 0) ? r * 100 / g : 0; if (p > 100) p = 100; if (p < 0) p = 0; printf "%.1f", p }')"
+left="$(awk -v r="$raised_usd" -v g="$goal_usd" 'BEGIN { d = g - r; if (d < 0) d = 0; printf "%.2f", d }')"
+raised_fmt="$(awk -v r="$raised_usd" 'BEGIN { printf "%.2f", r }')"
+if awk -v r="$raised_usd" -v g="$goal_usd" 'BEGIN { exit !(r >= g) }'; then
+  goal_state="Goal reached. Thank you. The iOS work is under way."
+else
+  goal_state="\$$left to go."
+fi
+donate_url="https://www.paypal.com/donate/?hosted_button_id=SVBTH8MJFBHTA"
+
+{
+cat <<HTML
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support FFSWallet</title>
+<meta name="description" content="Help put FFSWallet on the iOS App Store. At \$$goal_usd USD we register for the Apple Developer Program.">
+<meta name="color-scheme" content="light dark">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="page">
+
+<header class="bar bar-top">
+  <span><a href="./">&larr; FFSWallet downloads</a></span><span>Goal: <b>\$$goal_usd USD</b></span><span>Raised: <b>\$$raised_fmt</b></span>
+</header>
+
+<div class="name">
+  <h1>Support FFSWallet</h1>
+  <p class="lede">FFSWallet is free and built in spare time. Your donation goes toward one thing: getting it onto iPhones.</p>
+</div>
+
+<section id="goal">
+  <h2>The goal: an iOS build</h2>
+  <p>Shipping on the App Store needs an Apple Developer Program membership, which costs \$$goal_usd USD a year. <b>Once we have raised \$$goal_usd USD, we register for the Apple Developer Program and get an iOS build onto the store.</b></p>
+  <div class="meter" role="img" aria-label="\$$raised_fmt of \$$goal_usd USD raised">
+    <div class="meter-track"><div class="meter-fill" style="width:$pct%"></div></div>
+    <div class="meter-read"><span><b>\$$raised_fmt</b> of \$$goal_usd USD</span><span>$goal_state</span></div>
+  </div>
+  <a class="donate" href="$donate_url" target="_blank" rel="noopener">Donate with PayPal</a>
+  <p class="note">Any amount helps. PayPal handles the payment; FFSWallet never sees your details.</p>
+</section>
+
+<section id="how">
+  <h2>Where the money goes</h2>
+  <dl class="spec">
+    <dt>First \$$goal_usd</dt><dd>Apple Developer Program registration, so an iOS build can be signed and submitted.</dd>
+    <dt>After that</dt><dd>Nothing is promised. Anything beyond the goal keeps the membership renewed.</dd>
+    <dt>Tracking</dt><dd>The bar above is updated by hand from the PayPal account, so it can lag a few days behind. Last updated: <b>$(html_escape "$raised_on")</b>.</dd>
+  </dl>
+</section>
+
+<footer class="bar bar-bottom">
+  <span><a href="./">FFSWallet downloads</a></span><span>Generated: <b>$generated</b></span>
+</footer>
+
+</div>
+</body>
+</html>
+HTML
+} > "$out_dir/support.html"
 
 echo "built $out_dir: $release_count release(s), latest ${latest_tag:-none}"

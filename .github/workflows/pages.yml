@@ -8,6 +8,13 @@ on:
   release:
     types:
       - published
+  # The support page's donation total lives in donations.json; editing it
+  # on master republishes the site.
+  push:
+    branches:
+      - master
+    paths:
+      - .github/support/donations.json
   workflow_dispatch:
   workflow_call:
 
