@@ -37,8 +37,8 @@ platform_of() {
     *macos*arm64*) echo "macOS, Apple silicon" ;;
     *macos*amd64*) echo "macOS, Intel" ;;
     *windows*amd64*) echo "Windows x86-64" ;;
-    *android*.apk) echo "Android, sideload APK" ;;
-    *ios-simulator*) echo "iOS Simulator" ;;
+    *android*.apk) echo "Android, early alpha APK" ;;
+    *ios-simulator*) echo "iOS Simulator, early alpha" ;;
     SHA256SUMS) echo "Checksums" ;;
     *) echo "" ;;
   esac

@@ -51,10 +51,12 @@ tabs sit at the bottom. Wallets live in the app's private storage rather than
 the user config directory, and returning to the app from the background runs
 a catch-up, since a suspended app saw nothing.
 
-The `Mobile` workflow builds both on every push that touches the app, and
-Release attaches them to each release:
+**Mobile is early alpha.** The `Mobile` workflow builds both on every push
+that touches the app, and Release attaches them to each release with `-alpha`
+added to the file name (Release renames them; the workflow's own artifacts keep
+the plain names):
 
-- `FFSWallet-android.apk`: universal release APK (arm, arm64, x86, x86-64)
+- `FFSWallet-android-alpha.apk`: universal release APK (arm, arm64, x86, x86-64)
   for sideloading, signed with the project's release key. Fyne builds a
   non-debuggable app bundle and bundletool turns it into one signed APK
   (`.github/scripts/package-android.sh`). The key lives in three repository
@@ -62,7 +64,7 @@ Release attaches them to each release:
   `ANDROID_KEY_ALIAS`. Every update must be signed with the same key, so keep
   a backup of it. Without the secrets (a fork, say) CI builds a debug-signed
   test APK instead, and a tagged release fails rather than publish one.
-- `FFSWallet-ios-simulator-arm64.zip`: an ad-hoc-signed app for the iOS
+- `FFSWallet-ios-simulator-arm64-alpha.zip`: an ad-hoc-signed app for the iOS
   Simulator. Running on an iPhone needs an Apple Developer account: import the
   signing certificate and provisioning profile on a Mac, then
   `fyne release --target ios --certificate "Apple Distribution" --profile <name> --app-id com.ffswallet.mobile`.

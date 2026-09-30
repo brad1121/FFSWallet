@@ -220,6 +220,20 @@ jobs:
           pattern: FFSWallet-*
           merge-multiple: true
 
+      # Mobile builds are early alpha. The name says so on every download,
+      # so a file pulled out of the release still carries it. The suffix goes
+      # before the extension: FFSWallet-android-alpha.apk.
+      - name: Mark mobile builds as early alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          for f in FFSWallet-android.apk FFSWallet-ios-simulator-*.zip; do
+            [ -f "$f" ] || continue
+            mv "$f" "${f%.*}-alpha.${f##*.}"
+          done
+          ls -1
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
@@ -243,6 +257,16 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: release/*
+          body: |
+            **Desktop** (Linux, macOS, Windows): the assets without `-alpha` in the name.
+
+            **Mobile is early alpha.** `FFSWallet-android-alpha.apk` and
+            `FFSWallet-ios-simulator-*-alpha.zip` are first builds: expect rough
+            edges, and do not keep funds in a mobile wallet you cannot afford to
+            lose. The Android APK is for sideloading. The iOS build runs only in
+            the Simulator; an App Store build needs an Apple Developer account,
+            which is what https://brad1121.github.io/FFSWallet/support.html is
+            raising the $99 for.
 
   pages:
     name: Mirror release to Pages
