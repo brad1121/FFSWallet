@@ -404,6 +404,7 @@ func spentInputs(utxos []bsvsdk.UTXO) []store.SpentInput {
 			Value:     u.Value,
 			ScriptHex: hex.EncodeToString(u.Script),
 			Height:    u.Height,
+			Coinbase:  u.IsCoinbase,
 		})
 	}
 	return out
@@ -581,7 +582,14 @@ func (s *Service) discardRejectedLocked(rec store.TxRecord, reject bsvsdk.Reject
 			s.publishLocked(EventError, fmt.Sprintf("restore input %s:%d decode: %v", shortTxID(in.TxID), in.Vout, err))
 			continue
 		}
-		if err := s.wallet.ForceImportUTXO(in.TxID, in.Vout, in.Value, script, in.Height); err != nil {
+		if err := s.wallet.ForceImportCoin(bsvsdk.UTXO{
+			TxID:       in.TxID,
+			Vout:       in.Vout,
+			Value:      in.Value,
+			Script:     script,
+			Height:     in.Height,
+			IsCoinbase: in.Coinbase,
+		}); err != nil {
 			s.publishLocked(EventError, fmt.Sprintf("restore input %s:%d: %v", shortTxID(in.TxID), in.Vout, err))
 			continue
 		}

@@ -427,3 +427,32 @@ func TestSendSummaryShowsFee(t *testing.T) {
 		t.Fatalf("summary is %.0f wide; it will not fit a dialog on a %.0f-wide phone", min.Width, phoneSize.Width)
 	}
 }
+
+// TestBlocksToMaturity — the coin list counts a mining reward down to
+// the block it becomes spendable at. The creating block is the first
+// confirmation, so a coinbase mined at h matures at tip h+99.
+func TestBlocksToMaturity(t *testing.T) {
+	coinbase := store.UTXORecord{Height: 1000, Coinbase: true}
+	ordinary := store.UTXORecord{Height: 1000}
+
+	cases := []struct {
+		name string
+		rec  store.UTXORecord
+		tip  int32
+		want int32
+	}{
+		{"just mined", coinbase, 1000, coinbaseMaturity - 1},
+		{"halfway", coinbase, 1049, 50},
+		{"one short", coinbase, 1098, 1},
+		{"mature", coinbase, 1099, 0},
+		{"long mature", coinbase, 5000, 0},
+		{"tip behind the coin", coinbase, 500, coinbaseMaturity - 1},
+		{"unconfirmed coinbase", store.UTXORecord{Height: -1, Coinbase: true}, 1000, 0},
+		{"ordinary coin", ordinary, 1000, 0},
+	}
+	for _, tc := range cases {
+		if got := blocksToMaturity(tc.rec, tc.tip); got != tc.want {
+			t.Errorf("%s: got %d want %d", tc.name, got, tc.want)
+		}
+	}
+}

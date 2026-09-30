@@ -397,7 +397,14 @@ func (s *Service) restoreUTXOsLocked(original preRebuildState) {
 			s.publishLocked(EventError, fmt.Sprintf("restore utxo %s:%d decode: %v", u.TxID, u.Vout, err))
 			continue
 		}
-		if err := s.wallet.ForceImportUTXO(u.TxID, u.Vout, u.Value, script, u.Height); err != nil {
+		if err := s.wallet.ForceImportCoin(bsvsdk.UTXO{
+			TxID:       u.TxID,
+			Vout:       u.Vout,
+			Value:      u.Value,
+			Script:     script,
+			Height:     u.Height,
+			IsCoinbase: u.Coinbase,
+		}); err != nil {
 			s.publishLocked(EventError, fmt.Sprintf("restore utxo %s:%d import: %v", u.TxID, u.Vout, err))
 			continue
 		}

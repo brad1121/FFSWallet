@@ -91,6 +91,11 @@ against 2.0 on chain:
   `Wallet.Abandon` / `Service.AbandonTransaction`, the History detail
   dialog's "Abandon transaction" button. It marks the tx conflicted
   (cascading), reloads memory from the store, and tells the node to forget it.
+  A rejected transaction takes the same path: discarding it returned its
+  inputs to the in-memory balance but left the store holding it as a live
+  spender of those inputs, so the coins came back only until the next
+  unlock rebuilt memory from the store — and its invented change output
+  came back with them.
 
 Related: history status only ever learned `broadcast` and `seen`, so
 confirmed and conflicted txs stayed "pending" and were pushed to peers again
@@ -112,6 +117,17 @@ Related height bugs with the same signature — wrong balance, no error:
 - `Peer.TheirHeight` was written once at the version handshake and never again,
   so `BestPeerHeight` — and the "blocks behind" figure built on it — went stale
   from the moment a peer connected.
+- A block arriving before its own header was stamped `chainMgr.Height()+1`.
+  On a lite node `chainMgr.Height()` is the seed checkpoint for the whole
+  process lifetime, so that guess was always the same number and always
+  wrong — mined blocks 45,000 high got recorded at checkpoint+1, and the
+  coinbase in them looked 45,000 confirmations deep. `p2p.HeightOfBlock`
+  now answers from the headers index, else the parent's height, else the
+  height the coinbase declares under BIP34, else -1; the height is settled
+  once per block, before any transaction in it is applied, and `RecordHeader`
+  indexes nothing when it is -1. `repairCoinbaseHeights` re-derives stored
+  coinbase heights from BIP34 on every open, which is what saves a wallet
+  that already recorded the wrong ones from a rebuild rescan.
 
 ## Invariants
 
@@ -148,6 +164,19 @@ Breaking any of these produces a wrong balance with no error:
   genuine rejection of a transaction we sent discards it. The missing-inputs
   resync deliberately uses a plain rescan, never a rebuild: that path is
   reachable by any peer we broadcast to, and a wipe on demand would be a gift.
+- **A coinbase output is not money for 100 blocks.** Consensus refuses a spend
+  of a coinbase until `CoinbaseMaturity` (100) confirmations, counting the
+  block that created it as the first. The wallet ingested one as an ordinary
+  coin, so a mined wallet picked it as an input and every peer rejected the
+  transaction. The flag rides with the coin (`UTXO.IsCoinbase`), is persisted
+  (`archive_txs.is_coinbase`, backfilled from the raw bytes on upgrade) so it
+  survives an unlock, and selection, sweeps and named inputs all go through
+  `spendableLocked`. Maturity is measured against the highest of the pushed
+  chain height and the heights of the coins held, so a node still syncing
+  headers cannot make a matured coin look immature. `Balance` still counts an
+  immature coin — it is ours — and `SpendableBalance` / `ImmatureBalance`
+  split it; the UI shows both, because a balance that cannot be spent with no
+  explanation reads as a wrong balance.
 
 ## Testing rescans
 

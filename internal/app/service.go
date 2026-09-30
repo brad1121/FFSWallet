@@ -53,12 +53,17 @@ type NodeStatus struct {
 }
 
 type Snapshot struct {
-	Unlocked       bool
-	StorePath      string
-	Network        string
-	WalletName     string
-	FeePerByte     int64
-	BalanceSats    int64
+	Unlocked    bool
+	StorePath   string
+	Network     string
+	WalletName  string
+	FeePerByte  int64
+	BalanceSats int64
+	// ImmatureSats is the part of BalanceSats sitting in coinbase
+	// outputs the network will not let us spend yet. Counted in the
+	// balance because the coins are ours, reported separately because
+	// a send cannot use them.
+	ImmatureSats   int64
 	ReceiveAddress string
 	Addresses      []store.AddressRecord
 	UTXOs          []store.UTXORecord
@@ -593,6 +598,7 @@ func (s *Service) Snapshot() Snapshot {
 	}
 	if s.wallet != nil {
 		snap.BalanceSats = s.wallet.Balance()
+		snap.ImmatureSats = s.wallet.ImmatureBalance()
 	} else {
 		for _, u := range s.payload.UTXOs {
 			snap.BalanceSats += u.Value
@@ -652,7 +658,14 @@ func (s *Service) startExistingRuntimeLocked(payload *store.Payload, passphrase 
 			if err != nil {
 				return fmt.Errorf("decode legacy utxo script %s:%d: %w", u.TxID, u.Vout, err)
 			}
-			if err := wallet.ForceImportUTXO(u.TxID, u.Vout, u.Value, script, u.Height); err != nil {
+			if err := wallet.ForceImportCoin(bsvsdk.UTXO{
+				TxID:       u.TxID,
+				Vout:       u.Vout,
+				Value:      u.Value,
+				Script:     script,
+				Height:     u.Height,
+				IsCoinbase: u.Coinbase,
+			}); err != nil {
 				return fmt.Errorf("import legacy utxo %s:%d: %w", u.TxID, u.Vout, err)
 			}
 		}
@@ -729,6 +742,7 @@ func (s *Service) applyUTXOSnapshotLocked(src []bsvsdk.UTXO) {
 			ScriptHex: hex.EncodeToString(u.Script),
 			Height:    u.Height,
 			SeenAt:    at,
+			Coinbase:  u.IsCoinbase,
 		})
 	}
 	sort.Slice(next, func(i, j int) bool {

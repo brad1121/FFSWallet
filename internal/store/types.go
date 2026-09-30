@@ -60,6 +60,11 @@ type UTXORecord struct {
 	ScriptHex string    `json:"script_hex"`
 	Height    int32     `json:"height"`
 	SeenAt    time.Time `json:"seen_at"`
+	// Coinbase marks a mining reward, which the network will not let
+	// anyone spend until 100 confirmations have passed. Recorded here
+	// because the restore paths hand the wallet a value, a script and a
+	// height, and nothing in those says the coin is a coinbase.
+	Coinbase bool `json:"coinbase,omitempty"`
 }
 
 // SpentInput is a UTXO a broadcast transaction consumed. Kept so a rejected
@@ -72,6 +77,7 @@ type SpentInput struct {
 	Value     int64  `json:"value"`
 	ScriptHex string `json:"script_hex"`
 	Height    int32  `json:"height"`
+	Coinbase  bool   `json:"coinbase,omitempty"`
 }
 
 type TxRecord struct {

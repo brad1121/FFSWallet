@@ -20,6 +20,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	walletapp "github.com/brad1121/FFSWallet/internal/app"
+	"github.com/brad1121/FFSWallet/internal/bsvsdk"
 	"github.com/brad1121/FFSWallet/internal/store"
 	"github.com/brad1121/FFSWallet/internal/update"
 )
@@ -51,6 +52,7 @@ type UI struct {
 	stopScan   *widget.Button
 	lastAddrs  []store.AddressRecord
 	lastUTXOs  []store.UTXORecord
+	lastTip    int32
 	lastTxs    []store.TxRecord
 	closed     chan struct{}
 	// root is the window's only content: a fixed-minimum container the
@@ -1070,7 +1072,14 @@ func (u *UI) refresh() {
 		return
 	}
 	snap := u.svc.Snapshot()
-	u.balanceLabel.SetText("Balance: " + formatSats(snap.BalanceSats))
+	balance := "Balance: " + formatSats(snap.BalanceSats)
+	if snap.ImmatureSats > 0 {
+		// A mined coin is in the balance but cannot be spent for 100
+		// blocks; say so here rather than let a send fail with what
+		// looks like a wrong balance.
+		balance += fmt.Sprintf(" — %s immature", formatSats(snap.ImmatureSats))
+	}
+	u.balanceLabel.SetText(balance)
 	u.networkLabel.SetText("Network: " + walletapp.NetworkLabel(snap.Network))
 	u.peerLabel.SetText(fmt.Sprintf("Peers: %d", snap.Status.PeerCount))
 	u.heightLabel.SetText(formatHeight(snap.Status.ChainHeight, snap.Status.BestPeerHeight, snap.SyncedHeight, snap.ScanRate, snap.ScanPhase))
@@ -1091,9 +1100,13 @@ func (u *UI) refresh() {
 		u.fillAddresses(snap.Addresses)
 		u.lastAddrs = append([]store.AddressRecord(nil), snap.Addresses...)
 	}
-	if !reflect.DeepEqual(u.lastUTXOs, snap.UTXOs) {
-		u.fillUTXOs(snap.UTXOs)
+	// The tip is part of what a coin row says — a coinbase counts down
+	// to maturity — so a new block repaints the list as much as a new
+	// coin does.
+	if !reflect.DeepEqual(u.lastUTXOs, snap.UTXOs) || u.lastTip != snap.Status.ChainHeight {
+		u.fillUTXOs(snap.UTXOs, snap.Status.ChainHeight)
 		u.lastUTXOs = append([]store.UTXORecord(nil), snap.UTXOs...)
+		u.lastTip = snap.Status.ChainHeight
 	}
 	if !reflect.DeepEqual(u.lastTxs, snap.History) {
 		u.fillHistory(snap.History)
@@ -1151,14 +1164,18 @@ func (u *UI) fillAddresses(records []store.AddressRecord) {
 	u.addressBox.Refresh()
 }
 
-func (u *UI) fillUTXOs(records []store.UTXORecord) {
+func (u *UI) fillUTXOs(records []store.UTXORecord, tip int32) {
 	if u.utxoBox == nil {
 		return
 	}
 	rows := make([]fyne.CanvasObject, 0, len(records))
 	for _, rec := range records {
 		utxo := rec
-		button := newDoubleTapButton(fmt.Sprintf("%s:%d  %s  height %d", short(rec.TxID), rec.Vout, formatSats(rec.Value), rec.Height), func() {
+		label := fmt.Sprintf("%s:%d  %s  height %d", short(rec.TxID), rec.Vout, formatSats(rec.Value), rec.Height)
+		if left := blocksToMaturity(rec, tip); left > 0 {
+			label += fmt.Sprintf("  coinbase, immature (%d blocks)", left)
+		}
+		button := newDoubleTapButton(label, func() {
 			u.showUTXODetail(utxo)
 		})
 		button.Alignment = widget.ButtonAlignLeading
@@ -1170,6 +1187,28 @@ func (u *UI) fillUTXOs(records []store.UTXORecord) {
 	}
 	u.utxoBox.Objects = rows
 	u.utxoBox.Refresh()
+}
+
+// coinbaseMaturity is the SDK's own figure for how many confirmations
+// a mining reward needs before the network accepts a spend of it.
+const coinbaseMaturity = bsvsdk.CoinbaseMaturity
+
+// blocksToMaturity reports how many more blocks a coinbase output
+// needs before it can be spent, or 0 when it is spendable now. The
+// block that created it counts as its first confirmation, matching the
+// SDK's own maturity check.
+func blocksToMaturity(rec store.UTXORecord, tip int32) int32 {
+	if !rec.Coinbase || rec.Height < 0 {
+		return 0
+	}
+	if tip < rec.Height {
+		tip = rec.Height
+	}
+	left := coinbaseMaturity - (tip - rec.Height + 1)
+	if left < 0 {
+		return 0
+	}
+	return left
 }
 
 func (u *UI) fillHistory(records []store.TxRecord) {
