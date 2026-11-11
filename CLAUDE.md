@@ -52,6 +52,18 @@ checkpoint to paper over it. It has now been introduced three separate ways:
   list captured once at scan start, eventually the walk. Not silent, but it
   ended catch-ups early with an error and no cursor advance. A page whose
   blocks the manager already indexes is stale traffic, and is skipped.
+- **A peer not yet through its handshake, or one that never answers.** A peer
+  is in `ConnectedPeers`/`PeerCount` from the moment its socket opens, but it
+  drops a `getheaders` or `getdata` sent before its verack — so a walk started
+  right after connect asked a peer that was never going to reply. And a peer
+  that took a `getdata` and went silent held the replay head for the whole
+  `BlockTimeout` (5 min), the prefetch window filling behind it. Walks and
+  the fetch pool now use only `ReadyPeers`, and `RescanOptions.StallTimeout`
+  (15s, set explicitly in `internal/app/rescan.go`) gives a block to another
+  peer when a whole window passes with no block bytes from the one asked
+  (`Peer.BlockBytesReceived`, so a slow large block is not a stall). Two
+  stalls running rests the peer for 2 min. Slow, not wrong — but a catch-up
+  that crawls reads to a user as one that stopped.
 
 The lesson: **a headers page must be proven to be the reply to our own
 getheaders before it is acted on.** Both the "builds on the cursor" check and

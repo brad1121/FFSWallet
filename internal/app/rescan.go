@@ -177,8 +177,15 @@ func (s *Service) rescanFromHash(target RescanTarget, rebuild bool) (string, err
 	}
 	lastProgress := time.Time{}
 	stats, err := wallet.RescanFromHash(scanCtx, target.Hash, bsvsdk.RescanOptions{
-		MaxBlocks:                 1_000_000,
-		BlockTimeout:              5 * time.Minute,
+		MaxBlocks:    1_000_000,
+		BlockTimeout: 5 * time.Minute,
+		// BlockTimeout bounds a whole download (a ~1 GB block on a slow
+		// link); StallTimeout bounds silence. A peer that takes a getdata
+		// and sends nothing used to hold the replay head — and, once the
+		// prefetch window filled, the whole scan — for the full five
+		// minutes. Now the block goes to another peer after this long with
+		// no block bytes, and a peer that stalls twice is rested.
+		StallTimeout:              15 * time.Second,
 		BlockProgressInterval:     30 * time.Second,
 		MaxConsecutiveBlockErrors: 5,
 		StartHeight:               target.StartHeight,
